@@ -1,9 +1,20 @@
+import os
+import json
 import sqlite3
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DB_PATH = "reputation.db"
+
+
+def get_connection():
+    return sqlite3.connect(DB_PATH)
 
 
 def init_db():
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -38,19 +49,12 @@ def init_db():
     )""")
 
     cursor.execute("""
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_mention
-    ON mentions(entity, text)
-    """)
-
-    cursor.execute("""
     CREATE TABLE IF NOT EXISTS analysis_cache (
         brand TEXT PRIMARY KEY,
         result JSON,
         cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
 
-    # Add description column if it doesn't exist
-    # (for existing databases that don't have it yet)
     try:
         cursor.execute("ALTER TABLE entities ADD COLUMN description TEXT")
     except Exception:
@@ -58,16 +62,11 @@ def init_db():
 
     conn.commit()
     conn.close()
+    print("[DB] Connected to local SQLite")
 
 
 def should_save_score(brand: str, new_score: int) -> bool:
-    """
-    Returns True only if:
-    - No previous score exists for this brand
-    - Last score was saved more than 25 minutes ago
-    - Score changed by more than 3 points since last save
-    """
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -106,7 +105,7 @@ def save_result(brand: str, sentiment: dict, score: int):
         print(f"[DB] Score unchanged for {brand}, skipping save")
         return
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -128,21 +127,24 @@ def save_result(brand: str, sentiment: dict, score: int):
 
 def save_mention(entity: str, source: str, text: str, sentiment: str):
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
-    INSERT OR IGNORE INTO mentions (entity, source, text, sentiment)
-    VALUES (?, ?, ?, ?)
-    """, (entity, source, text, sentiment))
-
-    conn.commit()
-    conn.close()
+    try:
+        cursor.execute("""
+        INSERT OR IGNORE INTO mentions (entity, source, text, sentiment)
+        VALUES (?, ?, ?, ?)
+        """, (entity, source, text, sentiment))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 
 def get_history(brand: str) -> list:
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -170,7 +172,7 @@ def get_history(brand: str) -> list:
 
 def get_latest_result(brand: str) -> dict | None:
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -198,7 +200,7 @@ def get_latest_result(brand: str) -> dict | None:
 
 def add_entity(name: str, entity_type: str = "brand", description: str = ""):
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -211,9 +213,8 @@ def add_entity(name: str, entity_type: str = "brand", description: str = ""):
 
 
 def get_entity_description(name: str) -> str:
-    """Returns stored description for an entity if it exists."""
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -230,7 +231,7 @@ def get_entity_description(name: str) -> str:
 
 def get_all_entities() -> list:
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("SELECT name, type, description FROM entities")
@@ -249,40 +250,32 @@ def get_all_entities() -> list:
 
 
 def save_analysis_cache(brand: str, result: dict):
-    """
-    Saves full analysis result to cache.
-    Only saves if result is valid and non-empty.
-    """
-    import json
 
-    # Don't cache empty or failed results
     if not result:
         return
     if result.get("sentiment", {}).get("reason") == "No mentions found":
         print(f"[Cache] Skipping empty result for '{brand}'")
         return
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
-    INSERT OR REPLACE INTO analysis_cache (brand, result, cached_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    """, (brand, json.dumps(result)))
-
-    conn.commit()
-    conn.close()
-    print(f"[Cache] Saved analysis for '{brand}'")
+    try:
+        cursor.execute("""
+        INSERT OR REPLACE INTO analysis_cache (brand, result, cached_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        """, (brand, json.dumps(result)))
+        conn.commit()
+        print(f"[Cache] Saved analysis for '{brand}'")
+    except Exception as e:
+        print(f"[Cache] Save error for '{brand}': {e}")
+    finally:
+        conn.close()
 
 
 def get_analysis_cache(brand: str, max_age_minutes: int = 120) -> dict | None:
-    """
-    Returns cached analysis if fresh enough.
-    Returns None if no cache or cache is stale.
-    """
-    import json
 
-    conn = sqlite3.connect("reputation.db")
+    conn = get_connection()
     cursor = conn.cursor()
 
     try:
@@ -311,6 +304,4 @@ def get_analysis_cache(brand: str, max_age_minutes: int = 120) -> dict | None:
 
     except Exception as e:
         print(f"[Cache] Error reading cache for '{brand}': {e}")
-        if conn:
-            conn.close()
         return None
