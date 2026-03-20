@@ -21,7 +21,26 @@ app = FastAPI(
     version="3.0.0"
 )
 
-init_db()
+# Default entities to monitor
+# Edit this list to change what gets monitored on every server start
+DEFAULT_ENTITIES = [
+    ("Tesla", "brand", "Electric car company Elon Musk"),
+    ("Nike", "brand", "Sports apparel footwear company"),
+    ("Amazon", "brand", "Jeff Bezos ecommerce cloud technology"),
+    ("Nvidia", "brand", "GPU semiconductor AI chips company"),
+    ("Elon Musk", "person", "Tesla SpaceX Twitter founder CEO"),
+]
+
+
+def seed_entities():
+    """
+    Re-adds default entities on every server startup.
+    Uses INSERT OR IGNORE so existing entities are not overwritten.
+    Ensures monitor always has entities to track after any restart.
+    """
+    for name, entity_type, description in DEFAULT_ENTITIES:
+        add_entity(name, entity_type, description)
+    print(f"[Startup] {len(DEFAULT_ENTITIES)} default entities seeded")
 
 
 def start_monitor_delayed():
@@ -30,6 +49,9 @@ def start_monitor_delayed():
     start_monitor()
 
 
+# Initialize database, seed entities, start monitor
+init_db()
+seed_entities()
 threading.Thread(target=start_monitor_delayed, daemon=True).start()
 
 
@@ -92,7 +114,7 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
         cached["served_from_cache"] = True
         return cached
 
-    # No cache — check if we have stored description
+    # No cache — check stored description
     if not description:
         description = get_entity_description(brand)
 
