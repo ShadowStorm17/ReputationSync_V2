@@ -1,21 +1,25 @@
 import requests
 import os
 from dotenv import load_dotenv
+import urllib.parse 
 
 load_dotenv()
 
 API_KEY = os.getenv("YOUTUBE_API_KEY")
 
 
-def get_youtube_mentions(entity):
-
+def get_youtube_mentions(entity: str) -> list:
+    
     if not API_KEY:
         print("[YouTube] No API key found")
         return []
 
+    # URL encode the query to handle spaces and special characters
+    encoded_entity = urllib.parse.quote(entity)
+    
     url = (
         f"https://www.googleapis.com/youtube/v3/search"
-        f"?part=snippet&q={entity}&type=video"
+        f"?part=snippet&q={encoded_entity}&type=video"
         f"&maxResults=10&key={API_KEY}"
     )
 
