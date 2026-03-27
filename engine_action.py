@@ -7,20 +7,12 @@
 # Call 1: Situation + Immediate Actions + Actor Engagement
 # Call 2: 30-day Plan + Content + Spokesperson + Forecast
 #
-# Fix 1 — Score forecast realism:
-#   Forecast cap enforced in prompt with explicit numeric bounds.
-#   if_no_action must be lower than current for declining trajectory.
-#
-# Fix 2 — Forum engagement logic:
-#   Actor type detection added. Forums (Hacker News, Reddit) receive
-#   forum-specific engagement (AMA, comment response, content submission).
-#   News outlets receive media-specific engagement (interview, embargo).
-#   "Exclusive interview with Hacker News" can never be generated again.
-#
-# Fix 3 — Hallucination guard:
-#   Both prompts explicitly forbid inventing product names, projects,
-#   or initiatives not confirmed in the intelligence briefing.
-#   Only confirmed positive signals from Engine 2 data may be referenced.
+# Fix 1 — Score forecast realism (numeric bounds + trajectory floor)
+# Fix 2 — Forum engagement logic (type-aware approach rules)
+# Fix 3 — Hallucination guard (no invented names or initiatives)
+# Fix 4 — Week-specific success metrics (each week measurably different)
+# Fix 5 — what_not_to_do tied to confirmed crisis indicators
+# Fix 6 — Key messages specific enough to be spoken directly to press
 # ============================================================
 
 import os
@@ -107,41 +99,37 @@ CRISIS_TIER_INSTRUCTIONS = {
 }
 
 
-# ── Fix 2: Actor Type Classification ─────────────────────────────────────────
-# Forums require completely different engagement than news outlets.
-# This block is injected into both prompts so the AI never suggests
-# an "exclusive interview" with a community forum.
+# ── Actor Type Engagement Rules ───────────────────────────────────────────────
 
 ACTOR_TYPE_ENGAGEMENT_RULES = """
 ACTOR ENGAGEMENT RULES BY TYPE — FOLLOW STRICTLY:
 - Forums (Hacker News, Reddit, Product Hunt):
-    DO: AMA post, comment response from entity, submit positive content for upvoting,
-        engage directly in discussion threads, respond to top critical comments.
-    DO NOT: Suggest exclusive interview, press briefing, or embargo with a forum.
-    WHY: Forums are communities, not editors. Engagement must feel organic.
+    DO: AMA post, direct comment response from entity, submit positive
+        content for community upvoting, engage in discussion threads,
+        respond to top critical comments personally.
+    DO NOT: Suggest exclusive interview, press briefing, or embargo
+        with a forum. Forums are communities not editors.
 
 - News outlets (CNBC, Bloomberg, WSJ, Reuters, NYT, Guardian, BBC):
-    DO: Exclusive interview, embargo briefing, op-ed submission, direct quote response,
-        press conference invitation, background briefing.
+    DO: Exclusive interview, embargo briefing, op-ed submission,
+        direct quote response, press conference invitation,
+        background briefing for context-setting.
     DO NOT: Suggest AMA or community post for a news outlet.
 
 - YouTube channels:
-    DO: Exclusive video interview, documentary cooperation, sponsored content,
+    DO: Exclusive video interview, documentary cooperation,
         behind-the-scenes access, response video statement.
     DO NOT: Treat YouTube channels as forums or newspapers.
 
 - Social media (Twitter/X, LinkedIn, Instagram):
-    DO: Direct post, thread, statement, pinned response, live video.
-    DO NOT: Suggest these as press briefing venues.
+    DO: Direct post, thread, pinned statement, live video response.
+    DO NOT: Suggest social media as a press briefing venue.
 """
 
 
 # ── JSON Cleaner ──────────────────────────────────────────────────────────────
 
 def clean_json(raw: str) -> str:
-    """
-    Cleans common Groq JSON formatting issues before parsing.
-    """
     if "```" in raw:
         parts = raw.split("```")
         raw = parts[1] if len(parts) > 1 else raw
@@ -162,10 +150,6 @@ def build_situation_block(
     risk_level, alerts, forecast, recommendation,
     estimated_score
 ) -> str:
-    """
-    Builds the shared situation intelligence block used in both Groq calls.
-    Includes actor type labels so the AI knows which engagement rules apply.
-    """
     actor_block = ""
     for a in top_actors:
         actor_type = a.get("type", "unknown")
@@ -195,18 +179,18 @@ SUMMARY: {summary}
 
 SENTIMENT: {sentiment.get("label", "")} — {sentiment.get("reason", "")}
 
-CONFIRMED CRISIS INDICATORS (real media coverage only — do not add to this list):
+CONFIRMED CRISIS INDICATORS (real media — do not add to or invent from this list):
 {chr(10).join("- " + s for s in signals.get("crisis_indicators", [])) or "None"}
 
-CONFIRMED POSITIVE SIGNALS (real media coverage only — do not add to this list):
+CONFIRMED POSITIVE SIGNALS (real media — do not add to or invent from this list):
 {chr(10).join("- " + s for s in signals.get("positive_signals", [])) or "None"}
 
-ACTOR AUTHORITY LANDSCAPE (actor Type field determines engagement method):
+ACTOR AUTHORITY LANDSCAPE (Type field determines engagement method):
 {actor_block or "No actor data"}
 
 CRITICS (driving negative narrative): {", ".join(critics) if critics else "None"}
-DEFENDERS (supporting entity): {", ".join(defenders) if defenders else "NONE — narrative completely unchallenged"}
-NEUTRAL (convertible to defenders): {", ".join(neutral) if neutral else "None"}
+DEFENDERS (supporting entity): {", ".join(defenders) if defenders else "NONE — narrative unchallenged"}
+NEUTRAL (convertible): {", ".join(neutral) if neutral else "None"}
 PRIMARY NARRATIVE DRIVER: {primary_driver or "Unknown"}
 
 ACTIVE ALERTS:
@@ -227,14 +211,6 @@ def call_immediate_actions(
     risk_level: str,
     crisis_prob: int
 ) -> dict:
-    """
-    First focused Groq call.
-    Returns: situation_assessment, strategic_goal, immediate_actions,
-             narrative_strategy, actor_engagement.
-
-    Fix 2 applied: ACTOR_TYPE_ENGAGEMENT_RULES injected.
-    Fix 3 applied: Hallucination guard in RULES section.
-    """
     tier = CRISIS_TIER_INSTRUCTIONS.get(
         risk_level.lower(), CRISIS_TIER_INSTRUCTIONS["medium"]
     )
@@ -254,44 +230,47 @@ RULES — FOLLOW EXACTLY:
 2. NO generic advice — "engage with media" is not acceptable
 3. Every immediate action MUST have if_taken, if_ignored, and score_impact fields
 4. if_taken = specific narrative outcome if action is executed within timeline
-5. if_ignored = specific consequence to score and narrative if action is skipped
+5. if_ignored = specific consequence referencing the actual actor or indicator affected
 6. score_impact = realistic score change (e.g. "+3 to +6 points")
-7. Actor engagement approach must match the actor's TYPE using the engagement rules above
+7. Actor engagement approach must match actor TYPE using engagement rules above
 8. Forums (Hacker News, Reddit) NEVER receive interview or press briefing suggestions
-9. repercussion_if_ignored must be specific to that actor's current narrative role
-10. HALLUCINATION GUARD: Do NOT invent product names, project names, initiatives,
-    or events not explicitly listed in the CONFIRMED signals above.
-    Only reference what is in the intelligence briefing. If positive signals are thin,
-    acknowledge that and work with what exists.
+9. repercussion_if_ignored must name the specific actor and their likely next move
+10. HALLUCINATION GUARD: Never invent product names, projects, initiatives, or events
+    not in the CONFIRMED signals above. Work only with what is in the briefing.
+11. KEY MESSAGES must be complete sentences a spokesperson can say directly to camera.
+    Not topics. Not themes. Actual quotable statements grounded in confirmed facts.
+    Bad example: "We are addressing the lawsuit."
+    Good example: "We are cooperating fully with the SEC investigation and have
+    provided all requested documents — we expect this matter to be resolved in court."
 
 Return ONLY valid JSON — no explanation, no markdown:
 {{
-  "situation_assessment": "<3-4 specific sentences referencing real crisis indicators and real actors by name>",
+  "situation_assessment": "<3-4 sentences referencing real crisis indicators and named actors>",
   "strategic_goal": "<specific headline you want written about {entity} in 30 days>",
   "immediate_actions": [
     {{
       "priority": 1,
-      "action": "<specific named action — who does what, where, referencing real actor or platform>",
-      "why": "<why this works for {entity}'s specific situation right now>",
-      "how": "<exact execution steps — platform, format, who delivers, key message>",
+      "action": "<specific named action — who, what, where, referencing real actor>",
+      "why": "<why this works for {entity}'s specific confirmed situation>",
+      "how": "<exact steps — platform, format, who delivers, key message to lead with>",
       "timeline": "<24 hours or 48 hours or 3 days or 1 week>",
-      "expected_impact": "<specific narrative change>",
-      "if_taken": "<exactly what improves in narrative and score>",
-      "if_ignored": "<exactly what gets worse — reference specific actor or indicator>",
-      "score_impact": "<realistic score change e.g. +3 to +6 points>"
+      "expected_impact": "<specific narrative change — not generic>",
+      "if_taken": "<exactly what improves — name the actor or indicator affected>",
+      "if_ignored": "<exactly what gets worse — name the specific actor and their likely action>",
+      "score_impact": "<realistic range e.g. +3 to +6 points>"
     }}
   ],
   "narrative_strategy": {{
-    "counter_narrative": "<specific story using only {entity}'s CONFIRMED positive signals above>",
+    "counter_narrative": "<specific story using only CONFIRMED positive signals — no invented claims>",
     "key_messages": [
-      "<message 1 — specific, quotable, references a CONFIRMED positive signal>",
-      "<message 2 — directly addresses a named crisis indicator from the list>",
-      "<message 3 — forward-looking, specific to {entity}'s actual industry>"
+      "<complete quotable sentence — spokesperson reads this directly to press, references confirmed fact>",
+      "<complete quotable sentence — directly addresses a named confirmed crisis indicator honestly>",
+      "<complete quotable sentence — forward-looking, grounded in confirmed signals only>"
     ],
     "what_to_avoid": [
-      "<specific communication trap unique to {entity}'s confirmed situation>"
+      "<specific communication trap tied to a confirmed crisis indicator — not generic advice>"
     ],
-    "reframe": "<how to reframe the specific confirmed negative narrative>",
+    "reframe": "<how to reframe the specific confirmed negative narrative — use real language>",
     "tone_guidance": "<how {entity} should sound given crisis level and entity type>"
   }},
   "actor_engagement": [
@@ -299,11 +278,11 @@ Return ONLY valid JSON — no explanation, no markdown:
       "actor": "<real actor name from intelligence above>",
       "actor_type": "<forum or news or youtube or social>",
       "current_stance": "<their exact role and sentiment from the data>",
-      "goal": "<specific outcome you want from this actor>",
-      "approach": "<engagement method appropriate for this actor TYPE — follow engagement rules above>",
-      "message": "<specific angle or content pitched to this actor>",
-      "timing": "<when and why this timing>",
-      "repercussion_if_ignored": "<what this specific actor does to the narrative if not engaged>"
+      "goal": "<specific measurable outcome you want from this actor>",
+      "approach": "<engagement method matching actor TYPE from engagement rules>",
+      "message": "<specific angle or content — grounded in confirmed signals only>",
+      "timing": "<when and specifically why this timing>",
+      "repercussion_if_ignored": "<what this actor specifically does next if not engaged>"
     }}
   ]
 }}"""
@@ -317,7 +296,7 @@ Return ONLY valid JSON — no explanation, no markdown:
         return {}
 
 
-# ── Call 2: 30-Day Plan + Content + Spokesperson + Forecast ──────────────────
+# ── Call 2: Recovery Plan + Spokesperson + Forecast ──────────────────────────
 
 def call_recovery_plan(
     situation: str,
@@ -328,21 +307,9 @@ def call_recovery_plan(
     crisis_prob: int,
     trajectory: str
 ) -> dict:
-    """
-    Second focused Groq call.
-    Returns: content_plan, what_not_to_do, spokesperson_guidance,
-             30_day_plan, score_recovery_forecast.
-
-    Fix 1 applied: Score forecast bounds enforced with numeric caps
-                   and trajectory-aware if_no_action floor.
-    Fix 3 applied: Hallucination guard in RULES section.
-    """
-    # Fix 1 — Enforce realistic score bounds numerically in the prompt
     max_realistic  = min(100, score + 20)
     max_optimistic = min(100, score + 30)
 
-    # Fix 1 — if_no_action must reflect trajectory
-    # Declining = guaranteed drop. Stable = slight drop. Improving = holds.
     if trajectory in ["declining", "critical"]:
         if_no_action = max(0, score - 12)
     elif trajectory == "stable":
@@ -359,90 +326,98 @@ INTELLIGENCE BRIEFING:
 {situation}
 
 RULES — FOLLOW EXACTLY:
-1. Content plan titles must be actual publishable headlines — specific to {entity}, not placeholders
-2. What not to do must be specific to {entity}'s confirmed situation — not generic PR rules
-3. Spokesperson talking points must be complete quotable sentences ready to read to press
-4. Media Q&A questions must be ones journalists would actually ask based on CONFIRMED crisis indicators
-5. 30-day plan weeks 1 and 2 must be heavily front-loaded — most action happens here
-6. Each week must have a success_metric — a measurable outcome that confirms the week worked
-7. Score forecast is strictly bounded:
-   - current_score: {score} (do not change this)
-   - realistic_30_day_target: maximum {max_realistic} (current + 20 cap)
-   - optimistic_30_day_target: maximum {max_optimistic} (current + 30 cap)
-   - if_no_action: must be {if_no_action} or lower given the {trajectory} trajectory
-8. HALLUCINATION GUARD: Do NOT invent product names, project names, initiatives,
-   campaigns, or events not explicitly listed in the CONFIRMED signals above.
-   Only reference what is in the intelligence briefing. Never fabricate specifics.
+1. Content plan titles must be actual publishable headlines specific to {entity} — not placeholders
+2. what_not_to_do must reference CONFIRMED crisis indicators — not generic PR rules
+3. Spokesperson talking points must be complete press-ready sentences — not topics or themes
+4. Media Q&A questions must be ones journalists would ask based on CONFIRMED crisis indicators
+5. 30-day plan weeks 1 and 2 must be heavily front-loaded with specific actions
+6. SUCCESS METRICS MUST BE DIFFERENT FOR EACH WEEK AND SPECIFIC:
+   - Week 1 metric: measures CONTAINMENT (e.g. "No new crisis indicator surfaces in coverage")
+   - Week 2 metric: measures NARRATIVE SHIFT (e.g. "At least 2 neutral outlets publish positive angle")
+   - Week 3 metric: measures ACTOR CONVERSION (e.g. "Primary forum critic sentiment moves from negative to neutral")
+   - Week 4 metric: measures SCORE MOVEMENT (e.g. "Reputation score reaches X/100 based on next analysis run")
+   Do NOT use the same metric for multiple weeks.
+   Do NOT use vague metrics like "increase in positive coverage."
+7. Score forecast strictly bounded:
+   - current_score: {score}
+   - realistic_30_day_target: {max_realistic} exactly
+   - optimistic_30_day_target: {max_optimistic} exactly
+   - if_no_action: {if_no_action} or lower given {trajectory} trajectory
+8. what_not_to_do actions must be specific to {entity}'s CONFIRMED situation:
+   Reference actual crisis indicators by name. Explain the specific mechanism
+   by which the mistake amplifies the confirmed problem.
+9. HALLUCINATION GUARD: Never invent product names, projects, initiatives,
+   or events not in the CONFIRMED signals above.
 
 Return ONLY valid JSON — no explanation, no markdown:
 {{
   "content_plan": [
     {{
       "type": "<press release or blog post or social thread or video or interview or op-ed>",
-      "title": "<actual publishable headline specific to {entity}'s real situation>",
-      "angle": "<specific hook tied to a CONFIRMED positive signal from the intelligence>",
+      "title": "<actual publishable headline specific to {entity}'s real confirmed situation>",
+      "angle": "<specific hook tied to a CONFIRMED positive signal>",
       "platform": "<exact platform or publication name>",
-      "timing": "<when and why this timing matters>",
+      "timing": "<when and specifically why>",
       "expected_reach": "<who this reaches and why it matters for the narrative>",
       "narrative_friction_reduction": "<which specific confirmed Narrative Friction this removes>"
     }}
   ],
   "what_not_to_do": [
     {{
-      "action": "<specific named thing to avoid — tied to {entity}'s confirmed situation>",
-      "reason": "<exactly why this makes it worse for {entity} specifically>",
-      "risk": "<specific consequence if this mistake is made>"
+      "action": "<specific named action tied to a confirmed crisis indicator>",
+      "reason": "<exact mechanism by which this amplifies {entity}'s confirmed problem>",
+      "risk": "<specific consequence — name the actor or outlet likely to escalate>"
     }}
   ],
   "spokesperson_guidance": {{
-    "recommended_spokesperson": "<who should speak and why — CEO / PR lead / credible third party>",
+    "recommended_spokesperson": "<who should speak and why — specific to {entity}'s situation>",
     "talking_points": [
-      "<complete quotable sentence 1 — press-ready, references confirmed facts>",
-      "<complete quotable sentence 2 — addresses a confirmed crisis indicator honestly>",
-      "<complete quotable sentence 3 — forward-looking, grounded in confirmed signals>"
+      "<press-ready sentence 1 — spokesperson reads this verbatim, references confirmed fact>",
+      "<press-ready sentence 2 — addresses confirmed crisis indicator directly and honestly>",
+      "<press-ready sentence 3 — forward-looking, grounded in confirmed positive signals only>"
     ],
     "what_not_to_say": [
-      "<specific phrase or admission that would amplify the confirmed crisis indicators>"
+      "<specific phrase that would amplify a named confirmed crisis indicator>"
     ],
     "media_qa_prep": [
       {{
-        "likely_question": "<question journalist will ask based on confirmed crisis indicator 1>",
-        "recommended_answer": "<honest, specific answer that addresses without amplifying>"
+        "likely_question": "<question journalist asks based on confirmed crisis indicator 1>",
+        "recommended_answer": "<honest specific answer — does not deny confirmed facts>"
       }},
       {{
         "likely_question": "<question based on confirmed crisis indicator 2>",
-        "recommended_answer": "<honest, specific answer>"
+        "recommended_answer": "<honest specific answer>"
       }},
       {{
-        "likely_question": "<question based on Actor Authority landscape — e.g. critic outlet angle>",
-        "recommended_answer": "<honest, specific answer>"
+        "likely_question": "<question based on Actor Authority landscape — critic outlet angle>",
+        "recommended_answer": "<honest specific answer>"
       }}
     ]
   }},
   "30_day_plan": [
     {{
       "week": 1,
-      "focus": "<primary objective — containment or narrative launch>",
+      "focus": "Crisis containment — stop the bleeding",
       "actions": ["<specific action>", "<specific action>", "<specific action>"],
-      "success_metric": "<measurable outcome that confirms this week worked>"
+      "success_metric": "<containment metric — specific and measurable, not generic>"
     }},
     {{
       "week": 2,
-      "focus": "<primary objective — narrative building>",
+      "focus": "Narrative launch — introduce the counter-story",
       "actions": ["<specific action>", "<specific action>", "<specific action>"],
-      "success_metric": "<measurable outcome>"
+      "success_metric": "<narrative shift metric — different from week 1, specific>"
     }},
     {{
       "week": 3,
-      "focus": "<primary objective — actor conversion>",
+      "focus": "Actor conversion — move neutral outlets to defender",
       "actions": ["<specific action>", "<specific action>"],
-      "success_metric": "<measurable outcome>"
+      "success_metric": "<actor conversion metric — names a specific outlet or forum>"
     }},
     {{
       "week": 4,
-      "focus": "<primary objective — consolidation>",
+      "focus": "Consolidation — lock in score recovery",
       "actions": ["<specific action>", "<specific action>"],
-      "success_metric": "<measurable outcome>"
+      "success_metric": "<score movement metric — references target score number>"
     }}
   ],
   "score_recovery_forecast": {{
@@ -451,8 +426,8 @@ Return ONLY valid JSON — no explanation, no markdown:
     "optimistic_30_day_target": {max_optimistic},
     "if_no_action": {if_no_action},
     "key_milestones": [
-      "<specific confirmed action that must happen for score to reach realistic target>",
-      "<second milestone tied to confirmed signals or actors>",
+      "<specific confirmed action that must happen for score to reach {max_realistic}>",
+      "<second milestone tied to confirmed actors or signals>",
       "<third milestone>"
     ]
   }}
@@ -478,12 +453,8 @@ def generate_playbook(
 ) -> dict:
     """
     Engine 5 — Generates full prescriptive action playbook.
-
     Two focused Groq calls merged into one complete playbook.
-    All three quality fixes applied:
-      Fix 1: Score forecast realism (numeric bounds + trajectory-aware floor)
-      Fix 2: Forum engagement logic (type-aware approach rules)
-      Fix 3: Hallucination guard (no invented product names or initiatives)
+    All six quality fixes applied.
     """
     if not analysis or not prediction:
         return _empty_result()
@@ -533,20 +504,17 @@ def generate_playbook(
         situation, entity, entity_type, score, risk_level, crisis_prob, trajectory
     )
 
-    # ── Merge Both Calls ──────────────────────────────────────────────────────
+    # ── Merge ─────────────────────────────────────────────────────────────────
     playbook = {
-        # From Call 1
         "situation_assessment":  part1.get("situation_assessment", ""),
         "strategic_goal":        part1.get("strategic_goal", ""),
         "immediate_actions":     part1.get("immediate_actions", []),
         "narrative_strategy":    part1.get("narrative_strategy", {}),
         "actor_engagement":      part1.get("actor_engagement", []),
-
-        # From Call 2
-        "content_plan":           part2.get("content_plan", []),
-        "what_not_to_do":         part2.get("what_not_to_do", []),
-        "spokesperson_guidance":  part2.get("spokesperson_guidance", {}),
-        "30_day_plan":            part2.get("30_day_plan", []),
+        "content_plan":          part2.get("content_plan", []),
+        "what_not_to_do":        part2.get("what_not_to_do", []),
+        "spokesperson_guidance": part2.get("spokesperson_guidance", {}),
+        "30_day_plan":           part2.get("30_day_plan", []),
         "score_recovery_forecast": part2.get("score_recovery_forecast", {
             "current_score":            score,
             "realistic_30_day_target":  min(100, score + 20),
@@ -554,8 +522,6 @@ def generate_playbook(
             "if_no_action":             max(0, score - 8),
             "key_milestones":           []
         }),
-
-        # Metadata
         "entity":             entity,
         "entity_type":        entity_type,
         "generated_at":       datetime.utcnow().isoformat(),
@@ -577,10 +543,6 @@ def generate_playbook(
 # ── Empty Result Fallback ─────────────────────────────────────────────────────
 
 def _empty_result(score: int = 50, risk_level: str = "unknown") -> dict:
-    """
-    Returns structured empty playbook when generation fails.
-    Maintains schema consistency so downstream code never breaks.
-    """
     return {
         "situation_assessment":   "Insufficient data. Run /analyze first.",
         "strategic_goal":         "",
