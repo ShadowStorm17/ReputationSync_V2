@@ -203,7 +203,7 @@ def monitor_news():
             # ── Engine 4: Prediction ──────────────────────────────────────────
             time.sleep(10)
             logger.info(f"[Monitor] {entity}: running prediction...")
-            prediction = predict_trajectory(entity)
+            prediction = predict_trajectory(entity, ai_result, actor_result)
 
             # Build and cache full result
             full_result = {

@@ -242,7 +242,7 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
 
     # ── Engine 4: Prediction ──────────────────────────────────────────────────
     logger.info(f"[Analyze] Running prediction...")
-    prediction = predict_trajectory(brand)
+    prediction = predict_trajectory(brand, ai_result, actor_result)
 
     result = {
         "brand":            brand,
@@ -294,7 +294,7 @@ def playbook(brand: str, entity_type: str = "brand", description: str = ""):
     score = ai_result["sentiment"]["score"]
     save_result(brand, sentiment_counts, score)
 
-    prediction = predict_trajectory(brand)
+    prediction = predict_trajectory(brand, ai_result, actor_result)
     time.sleep(4)
 
     analysis = {
