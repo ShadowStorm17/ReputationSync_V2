@@ -14,6 +14,15 @@ from filter import filter_relevant
 from sentiment import analyze_sentiment
 import threading
 import time
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="ReputationSync Intelligence Engine",
