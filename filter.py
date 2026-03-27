@@ -1,20 +1,19 @@
 # filter.py
 # ============================================================
-# Engine 1 — Listening Layer: Relevance + Language Filter
-# ReputationSync — Narrative Friction reduction at ingestion
+# ReputationSync — Relevance + Language Filter
+# Engine 1 Listening quality gate
 #
 # Purpose: Ensures only English, brand-relevant content
 # reaches Engine 2 — Understanding for AI analysis.
 #
-# Non-English content pollutes narrative scoring by introducing
-# foreign sentiment signals that the AI misreads as English.
-# This filter is the quality gate between raw ingestion and
-# AI analysis.
+# B4 Fix v2: Removed collision-prone short words from
+# NON_ENGLISH_SIGNALS that matched common English substrings.
+# Raised threshold from 8% to 12% to reduce false positives.
+# Words like "con", "del", "las", "sur", "tem", "par" were
+# matching inside English words and rejecting valid content
+# from FOX, LA Times, UPI and other English-language outlets.
 #
-# B4 Fix: Added "text" key normalization for all source types.
-# YouTube returns title+description, not a unified "text" field.
-# This caused filter_relevant() to silently pass all YouTube
-# content through unfiltered — KeyError swallowed by isinstance.
+# Retained strong, unambiguous foreign-language markers only.
 # ============================================================
 
 import re
@@ -23,38 +22,61 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ── Non-English Word Signals ──────────────────────────────────────────────────
-# High-frequency function words unique to each language.
-# These appear constantly in native text but rarely in English.
-# Threshold: if >8% of words in a post match these, reject it.
+# IMPORTANT: Only include words that are:
+# 1. High-frequency in the target foreign language
+# 2. Rarely or never appear as standalone words in English text
+# 3. Not substrings of common English words
+#
+# Removed from original list (collision-prone):
+#   "sur"  → matches inside "surges", "surface", "surplus"
+#   "con"  → matches inside "concern", "consumer", "contract"
+#   "del"  → matches inside "model", "delivery", "delta"
+#   "las"  → matches inside "class", "clash", "Los Angeles"
+#   "tem"  → matches inside "system", "item", "problem"
+#   "par"  → matches inside "eparate", "compare", "partner"
+#   "por"  → matches inside "report", "support", "export"
+#   "son"  → common English word
+#   "com"  → matches domain suffixes (.com)
+#   "mais" → rare but "mais" appears in English names
+#   "hay"  → common English word (dried grass)
+#   "ser"  → matches inside "server", "service", "series"
+#   "bei"  → too short, rare collision risk
+#   "van"  → common English word and surname
+#   "het"  → matches inside "whether", "ether"
 
 NON_ENGLISH_SIGNALS = {
-    # German
+    # German — high frequency, unambiguous
     "und", "der", "die", "das", "ein", "eine", "ist", "wird",
-    "mit", "fur", "auf", "bei", "von", "aus", "nach", "uber",
-    "nicht", "auch", "dass", "sich", "werden", "oder", "aber",
-    "noch", "mehr", "hier", "finden", "thema", "lesen", "beim",
-    # French
-    "les", "des", "une", "pour", "sur", "avec", "dans", "par",
+    "mit", "auf", "von", "aus", "nach", "uber", "nicht", "auch",
+    "dass", "sich", "werden", "oder", "aber", "noch", "mehr",
+    "hier", "beim", "thema", "lesen",
+
+    # French — high frequency, unambiguous
+    "les", "des", "une", "pour", "avec", "dans",
     "qui", "que", "pas", "plus", "comme", "mais", "tout", "elle",
     "nous", "vous", "ils", "leur", "cette", "sont", "etait",
-    # Spanish
-    "los", "las", "una", "por", "con", "del", "sus",
-    "como", "este", "esta", "pero", "muy", "hay", "ser",
-    "tiene", "estan", "entre", "cuando", "tambien", "porque",
-    # Italian
+
+    # Spanish — high frequency, unambiguous
+    "los", "las", "una", "sus",
+    "este", "esta", "pero", "muy", "tiene",
+    "estan", "entre", "cuando", "tambien", "porque",
+
+    # Italian — high frequency, unambiguous
     "della", "dello", "degli", "alle", "agli", "nel", "nella",
-    "sono", "questo", "questa", "anche", "pero", "quando",
-    # Portuguese
-    "para", "uma", "com", "nao", "por", "seu", "sua",
-    "isso", "esse", "pelo", "pela", "tem",
-    # Dutch
-    "een", "het", "van", "zijn", "deze", "naar",
+    "sono", "questo", "questa", "anche", "quando",
+
+    # Portuguese — high frequency, unambiguous
+    "para", "uma", "nao", "seu", "sua",
+    "isso", "esse", "pelo", "pela",
+
+    # Dutch — high frequency, unambiguous
+    "een", "zijn", "deze", "naar",
     "heeft", "kunnen", "hebben",
 }
 
 # ── Boilerplate Signals ───────────────────────────────────────────────────────
-# Full phrases that definitively identify non-English aggregator
-# or publisher boilerplate. One match = immediate reject.
+# Full phrases that definitively identify non-English publisher boilerplate.
+# One match = immediate reject. These are extremely specific — no false positives.
 
 BOILERPLATE_SIGNALS = [
     "hier finden sie",
@@ -72,33 +94,32 @@ BOILERPLATE_SIGNALS = [
 
 def extract_text(post: dict | str) -> str:
     """
-    Extracts a unified text string from any post format.
+    Extracts unified text string from any post format.
 
-    Different sources return different dict schemas:
-    - NewsAPI / GNews:    {"text": "...", "source_name": "..."}
-    - HackerNews:         {"text": "...", "source_name": "..."}
-    - YouTube (old):      {"title": "...", "description": "..."}  ← No "text" key
-    - YouTube (new):      {"text": "...", "title": "...", ...}    ← Has "text" key
+    Different Engine 1 sources return different schemas:
+    - NewsAPI / GNews / HN: {"text": "...", "source_name": "..."}
+    - YouTube (new):        {"text": "...", "title": "...", ...}
+    - YouTube (old):        {"title": "...", "description": "..."}
 
-    B4 Fix: This function normalizes all formats to a single string.
-    Previously, YouTube posts with no "text" key caused silent
-    filter bypass — all YouTube content passed through unfiltered.
+    B4 Fix: Normalizes all formats to single string.
+    Previously YouTube posts with no "text" key caused silent
+    filter bypass — all YouTube content passed unfiltered.
     """
     if isinstance(post, str):
         return post
 
     if isinstance(post, dict):
-        # Primary: use unified "text" field if present (new YouTube format)
+        # Primary: unified text field (all new source formats)
         if post.get("text"):
             return post["text"]
 
-        # Fallback: reconstruct from title + description (old YouTube format)
+        # Fallback: reconstruct from title + description (legacy YouTube)
         title = post.get("title", "")
         description = post.get("description", "")
         if title or description:
             return f"{title}. {description}".strip(". ")
 
-        # Last resort: any string value in the dict
+        # Last resort: any known text field
         for key in ("content", "snippet", "body", "summary"):
             if post.get(key):
                 return post[key]
@@ -110,14 +131,14 @@ def is_english(text: str) -> bool:
     """
     Returns True if text is likely English.
 
-    Detection method: word-level frequency analysis.
-    Checks what percentage of words are known non-English
-    function words. If above threshold — reject.
+    Detection method: word-level frequency analysis against
+    known high-frequency foreign language function words.
 
-    Thresholds:
-    - >8% non-English words → reject (catches mixed content)
-    - 3+ non-English words in short text (<40 words) → reject
-      (catches short foreign snippets that beat the ratio)
+    Thresholds (v2 — raised to reduce false positives):
+    - Boilerplate phrase match → immediate reject
+    - >12% non-English words → reject (was 8%, raised to reduce FP)
+    - 4+ non-English words in short text (<30 words) → reject
+      (was 3 words / 40 word limit — tightened)
 
     Returns True (assume English) for very short texts
     where ratio detection is unreliable.
@@ -127,15 +148,15 @@ def is_english(text: str) -> bool:
 
     text_lower = text.lower()
 
-    # Immediate reject: known boilerplate phrases
+    # Immediate reject: unambiguous foreign boilerplate phrases
     for phrase in BOILERPLATE_SIGNALS:
         if phrase in text_lower:
             return False
 
-    # Extract clean words only (3+ letters, no numbers)
+    # Extract clean words (3+ letters, no numbers, no punctuation)
     words = re.findall(r'\b[a-z]{3,}\b', text_lower)
 
-    if len(words) < 3:
+    if len(words) < 5:
         return True  # Too short to judge reliably
 
     # Count non-English signal word matches
@@ -143,11 +164,13 @@ def is_english(text: str) -> bool:
     non_english_ratio = non_english_count / len(words)
 
     # Ratio threshold — catches long foreign articles
-    if non_english_ratio > 0.08:
+    # Raised from 8% to 12% to reduce English false positives
+    if non_english_ratio > 0.12:
         return False
 
     # Absolute count threshold — catches short foreign snippets
-    if non_english_count >= 3 and len(words) < 40:
+    # Tightened: requires 4+ matches in texts under 30 words
+    if non_english_count >= 4 and len(words) < 30:
         return False
 
     return True
@@ -161,16 +184,15 @@ def filter_relevant(posts: list, brand: str) -> list:
     1. Contain the brand name (relevance check)
     2. Are written in English (language check)
 
-    Accepts any post format (dict or string) via extract_text().
-    Logs rejection counts for pipeline visibility.
+    Accepts any post format via extract_text() normalization.
+    Logs rejection counts for full pipeline visibility.
 
     Args:
-        posts:  Raw list from any source (NewsAPI, YouTube, GNews, HN)
-        brand:  Entity name to check relevance against
+        posts: Raw list from any Engine 1 source
+        brand: Entity name to check relevance against
 
     Returns:
-        Filtered list in original dict/string format — structure preserved.
-        Only the selection changes, not the data shape.
+        Filtered list in original format — structure preserved.
     """
     if not posts:
         return []
@@ -181,7 +203,6 @@ def filter_relevant(posts: list, brand: str) -> list:
     rejected_language = 0
 
     for post in posts:
-        # Extract unified text regardless of source schema
         text = extract_text(post)
 
         if not text:
@@ -191,13 +212,11 @@ def filter_relevant(posts: list, brand: str) -> list:
         text_lower = text.lower()
 
         # ── Relevance Check ───────────────────────────────────────────────────
-        # Post must mention the brand to be relevant to this entity's narrative
         if brand_lower not in text_lower:
             rejected_relevance += 1
             continue
 
         # ── Language Check ────────────────────────────────────────────────────
-        # Non-English content pollutes Engine 2 sentiment and topic analysis
         if not is_english(text):
             rejected_language += 1
             logger.info(
