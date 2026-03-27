@@ -364,11 +364,11 @@ Return ONLY valid JSON — no explanation, no markdown:
   ],
   "what_not_to_do": [
     {{
-      "action": "<specific named action tied to a confirmed crisis indicator>",
-      "reason": "<exact mechanism by which this amplifies {entity}'s confirmed problem>",
-      "risk": "<specific consequence — name the actor or outlet likely to escalate>"
+      "action": "<specific action {entity} must avoid — written as something {entity} might actually do, e.g. 'Publicly dismiss the SEC lawsuit as politically motivated'>",
+      "reason": "<exact mechanism by which this amplifies a named confirmed crisis indicator>",
+      "risk": "<specific outlet or actor likely to escalate and how>"
     }}
-  ],
+  ],,
   "spokesperson_guidance": {{
     "recommended_spokesperson": "<who should speak and why — specific to {entity}'s situation>",
     "talking_points": [
