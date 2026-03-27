@@ -294,6 +294,7 @@ def playbook(brand: str, entity_type: str = "brand", description: str = ""):
     score = ai_result["sentiment"]["score"]
     save_result(brand, sentiment_counts, score)
 
+    # B5 fix: pass ai_result and actor_result to prediction
     prediction = predict_trajectory(brand, ai_result, actor_result)
     time.sleep(4)
 
