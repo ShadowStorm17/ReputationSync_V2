@@ -184,12 +184,12 @@ def monitor_news():
             # ── Engine 2: Understanding ───────────────────────────────────────
             logger.info(f"[Monitor] {entity}: running AI understanding...")
             ai_result = analyze_with_ai(entity, all_texts, entity_type)
-            time.sleep(10)  # Rate limit buffer for Groq API
+            time.sleep(15)  # Rate limit buffer for Groq API
 
             # ── Engine 3: Actor Intelligence ──────────────────────────────────
             logger.info(f"[Monitor] {entity}: running actor analysis...")
             actor_result = analyze_actors(entity, all_posts)
-            time.sleep(10)
+            time.sleep(15)
 
             # Save reputation score to history
             sentiment_counts = {

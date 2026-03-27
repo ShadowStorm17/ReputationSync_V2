@@ -82,7 +82,7 @@ def seed_entities():
 
 def start_monitor_delayed():
     print("[Monitor] Waiting 30s for server to fully start...")
-    time.sleep(30)
+    time.sleep(60)
     start_monitor()
 
 
@@ -273,37 +273,56 @@ def playbook(brand: str, entity_type: str = "brand", description: str = ""):
     if not description:
         description = get_entity_description(brand)
 
-    all_posts, source_counts = fetch_and_filter(brand, entity_type, description)
+    # Check if fresh analysis already exists in cache
+    # If so, use it directly — skip Engines 1-4 re-run
+    cached_analysis = get_analysis_cache(brand, max_age_minutes=120)
 
-    if not all_posts:
-        return {"brand": brand, "error": "No mentions found"}
+    if cached_analysis:
+        logger.info(f"[Playbook] Using cached analysis for '{brand}' — skipping re-fetch")
+        score    = cached_analysis.get("reputation_score", 50)
+        ai_result = {
+            "sentiment": cached_analysis.get("sentiment", {}),
+            "narrative": cached_analysis.get("narrative", {}),
+            "signals":   cached_analysis.get("signals", {}),
+            "summary":   cached_analysis.get("summary", ""),
+            "topics":    cached_analysis.get("topics", []),
+        }
+        actor_result = cached_analysis.get("actors", {})
+        prediction   = cached_analysis.get("prediction", {})
 
-    all_texts = [p["text"] for p in all_posts]
+    else:
+        logger.info(f"[Playbook] No cache — running full analysis...")
+        all_posts, source_counts = fetch_and_filter(brand, entity_type, description)
 
-    ai_result = analyze_with_ai(brand, all_texts, entity_type)
-    time.sleep(4)
+        if not all_posts:
+            return {"brand": brand, "error": "No mentions found"}
 
-    actor_result = analyze_actors(brand, all_posts)
-    time.sleep(4)
+        all_texts = [p["text"] for p in all_posts]
 
-    sentiment_counts = {
-        "positive": ai_result["sentiment"]["positive_count"],
-        "negative": ai_result["sentiment"]["negative_count"],
-        "neutral":  ai_result["sentiment"]["neutral_count"]
-    }
-    score = ai_result["sentiment"]["score"]
-    save_result(brand, sentiment_counts, score)
+        ai_result = analyze_with_ai(brand, all_texts, entity_type)
+        time.sleep(4)
 
-    # B5 fix: pass ai_result and actor_result to prediction
-    prediction = predict_trajectory(brand, ai_result, actor_result)
-    time.sleep(4)
+        actor_result = analyze_actors(brand, all_posts)
+        time.sleep(4)
 
+        sentiment_counts = {
+            "positive": ai_result["sentiment"]["positive_count"],
+            "negative": ai_result["sentiment"]["negative_count"],
+            "neutral":  ai_result["sentiment"]["neutral_count"]
+        }
+        score = ai_result["sentiment"]["score"]
+        save_result(brand, sentiment_counts, score)
+
+        prediction = predict_trajectory(brand, ai_result, actor_result)
+        time.sleep(4)
+
+    # Add reputation_score to analysis dict for Engine 5
     analysis = {
         "reputation_score": score,
-        "sentiment":        ai_result["sentiment"],
-        "narrative":        ai_result["narrative"],
-        "signals":          ai_result["signals"],
-        "summary":          ai_result["summary"]
+        "sentiment":        ai_result.get("sentiment", {}),
+        "narrative":        ai_result.get("narrative", {}),
+        "signals":          ai_result.get("signals", {}),
+        "summary":          ai_result.get("summary", ""),
     }
 
     logger.info(f"[Playbook] Running Engine 5 — Action...")
