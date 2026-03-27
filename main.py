@@ -79,27 +79,24 @@ def home():
 
 
 def fetch_and_filter(brand: str, entity_type: str, description: str):
-    """
-    Fetches from all sources and returns filtered capped posts.
-    Shared between /analyze and /playbook.
-    """
-    news_posts = get_news_mentions(brand, entity_type, description)
-    youtube_posts = get_youtube_mentions(brand)
-    gnews_posts = get_googlenews_mentions(brand, entity_type, description)
-    hn_posts = get_hackernews_mentions(brand)
+    
+    news_posts   = get_news_mentions(brand, entity_type, description)
+    youtube_posts = get_youtube_mentions(brand, entity_type, description)  # ← B4 fix: description added
+    gnews_posts  = get_googlenews_mentions(brand, entity_type, description)
+    hn_posts     = get_hackernews_mentions(brand)
 
-    news_posts = filter_relevant(news_posts, brand)[:30]
+    news_posts    = filter_relevant(news_posts, brand)[:30]
     youtube_posts = filter_relevant(youtube_posts, brand)[:15]
-    gnews_posts = filter_relevant(gnews_posts, brand)[:30]
-    hn_posts = filter_relevant(hn_posts, brand)[:15]
+    gnews_posts   = filter_relevant(gnews_posts, brand)[:30]
+    hn_posts      = filter_relevant(hn_posts, brand)[:15]
 
     all_posts = news_posts + gnews_posts + hn_posts + youtube_posts
 
     return all_posts, {
-        "newsapi": len(news_posts),
-        "google_news": len(gnews_posts),
-        "hacker_news": len(hn_posts),
-        "youtube": len(youtube_posts)
+        "newsapi":      len(news_posts),
+        "google_news":  len(gnews_posts),
+        "hacker_news":  len(hn_posts),
+        "youtube":      len(youtube_posts)
     }
 
 
