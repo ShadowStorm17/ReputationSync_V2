@@ -1,10 +1,35 @@
+# main.py
+# ============================================================
+# ReputationSync — FastAPI Server
+# All endpoints, startup lifecycle, entity seeding
+#
+# B3 FIX: YouTube quota tracking integrated into fetch_and_filter()
+# Quota is now tracked on both paths:
+#   - API endpoint path (/analyze, /playbook)
+#   - Background monitor path (monitor_youtube())
+# ============================================================
+
 from fastapi import FastAPI
 from engine_understanding import analyze_with_ai
 from engine_actors import analyze_actors
 from engine_prediction import predict_trajectory
 from engine_action import generate_playbook
-from database import init_db, save_result, save_analysis_cache, get_analysis_cache
-from database import get_history, add_entity, save_mention, get_entity_description
+from database import (
+    init_db,
+    save_result,
+    save_analysis_cache,
+    get_analysis_cache,
+    get_history,
+    add_entity,
+    save_mention,
+    get_entity_description,
+    get_all_entities,
+    # B3 — YouTube quota tracking
+    get_youtube_quota_usage,
+    set_youtube_quota_usage,
+    reset_youtube_quota_if_new_day,
+    get_youtube_quota_status,
+)
 from monitor import start_monitor
 from sources.news_source import get_news_mentions
 from sources.youtube_source import get_youtube_mentions
@@ -24,20 +49,23 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# ── YouTube Quota Constants ───────────────────────────────────────────────────
+YOUTUBE_DAILY_QUOTA   = 10000  # units per day
+YOUTUBE_COST_PER_CALL = 100    # units per search.list call
+
 app = FastAPI(
     title="ReputationSync Intelligence Engine",
     description="AI-powered reputation intelligence platform",
     version="3.0.0"
 )
 
-# Default entities to monitor
-# Edit this list to change what gets monitored on every server start
+# ── Default Entities ──────────────────────────────────────────────────────────
 DEFAULT_ENTITIES = [
-    ("Tesla", "brand", "Electric car company Elon Musk"),
-    ("Nike", "brand", "Sports apparel footwear company"),
-    ("Amazon", "brand", "Jeff Bezos ecommerce cloud technology"),
-    ("Nvidia", "brand", "GPU semiconductor AI chips company"),
-    ("Elon Musk", "person", "Tesla SpaceX Twitter founder CEO"),
+    ("Tesla",      "brand",  "Electric car company Elon Musk"),
+    ("Nike",       "brand",  "Sports apparel footwear company"),
+    ("Amazon",     "brand",  "Jeff Bezos ecommerce cloud technology"),
+    ("Nvidia",     "brand",  "GPU semiconductor AI chips company"),
+    ("Elon Musk",  "person", "Tesla SpaceX Twitter founder CEO"),
 ]
 
 
@@ -58,11 +86,13 @@ def start_monitor_delayed():
     start_monitor()
 
 
-# Initialize database, seed entities, start monitor
+# ── Startup ───────────────────────────────────────────────────────────────────
 init_db()
 seed_entities()
 threading.Thread(target=start_monitor_delayed, daemon=True).start()
 
+
+# ── Root ──────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def home():
@@ -87,13 +117,54 @@ def home():
     }
 
 
-def fetch_and_filter(brand: str, entity_type: str, description: str):
-    
-    news_posts   = get_news_mentions(brand, entity_type, description)
-    youtube_posts = get_youtube_mentions(brand, entity_type, description)  # ← B4 fix: description added
-    gnews_posts  = get_googlenews_mentions(brand, entity_type, description)
-    hn_posts     = get_hackernews_mentions(brand)
+# ── Core Fetch + Filter ───────────────────────────────────────────────────────
 
+def fetch_and_filter(brand: str, entity_type: str, description: str):
+    """
+    Fetches from all Engine 1 sources and returns filtered, capped posts.
+
+    B3 FIX: YouTube quota tracking now integrated into this function.
+    Both the API endpoint path (/analyze, /playbook) and the background
+    monitor path (monitor_youtube) now track quota against the same
+    database counter — preventing silent over-consumption.
+
+    B4 FIX: description passed to all sources including YouTube.
+    Anchors ambiguous entity names to correct context at search level.
+    """
+
+    # ── News Sources (no quota concern) ──────────────────────────────────────
+    news_posts  = get_news_mentions(brand, entity_type, description)
+    gnews_posts = get_googlenews_mentions(brand, entity_type, description)
+    hn_posts    = get_hackernews_mentions(brand)
+
+    # ── YouTube Source (quota-gated) ──────────────────────────────────────────
+    # B3: Check quota before making YouTube API call.
+    # Both /analyze and /playbook routes go through this function,
+    # so all YouTube consumption is tracked in one place.
+    reset_youtube_quota_if_new_day()
+    current_quota = get_youtube_quota_usage()
+
+    if current_quota < YOUTUBE_DAILY_QUOTA:
+        youtube_posts = get_youtube_mentions(brand, entity_type, description)
+
+        # Increment counter only after successful fetch
+        new_quota = current_quota + YOUTUBE_COST_PER_CALL
+        set_youtube_quota_usage(new_quota)
+
+        logger.info(
+            f"[YouTube Quota] API path | +{YOUTUBE_COST_PER_CALL} units | "
+            f"Total: {new_quota:,} / {YOUTUBE_DAILY_QUOTA:,} | "
+            f"Entity: '{brand}'"
+        )
+    else:
+        logger.warning(
+            f"[YouTube Quota] EXHAUSTED | "
+            f"Skipping YouTube for '{brand}' | "
+            f"Resets at midnight Pacific"
+        )
+        youtube_posts = []
+
+    # ── Filter + Cap ──────────────────────────────────────────────────────────
     news_posts    = filter_relevant(news_posts, brand)[:30]
     youtube_posts = filter_relevant(youtube_posts, brand)[:15]
     gnews_posts   = filter_relevant(gnews_posts, brand)[:30]
@@ -109,34 +180,38 @@ def fetch_and_filter(brand: str, entity_type: str, description: str):
     }
 
 
+# ── /analyze ──────────────────────────────────────────────────────────────────
+
 @app.get("/analyze")
 def analyze(brand: str, entity_type: str = "brand", description: str = ""):
-    print(f"[Analyze] Request for: {brand} ({entity_type})")
+    logger.info(f"[Analyze] Request for: {brand} ({entity_type})")
 
-    # Check cache first
+    # Check cache first — serves instantly if fresh
     cached = get_analysis_cache(brand, max_age_minutes=120)
     if cached:
-        print(f"[Analyze] Returning cached result for '{brand}'")
+        logger.info(f"[Analyze] Returning cached result for '{brand}'")
         cached["served_from_cache"] = True
         return cached
 
-    # No cache — check stored description
+    # No cache — fall back to stored description if none provided
     if not description:
         description = get_entity_description(brand)
 
-    print(f"[Analyze] No cache — running full analysis...")
+    logger.info(f"[Analyze] No cache — running full analysis...")
 
     all_posts, source_counts = fetch_and_filter(brand, entity_type, description)
 
-    print(f"[Analyze] NewsAPI: {source_counts['newsapi']} | "
-          f"GoogleNews: {source_counts['google_news']} | "
-          f"HN: {source_counts['hacker_news']} | "
-          f"YouTube: {source_counts['youtube']}")
+    logger.info(
+        f"[Analyze] NewsAPI: {source_counts['newsapi']} | "
+        f"GoogleNews: {source_counts['google_news']} | "
+        f"HN: {source_counts['hacker_news']} | "
+        f"YouTube: {source_counts['youtube']}"
+    )
 
     if not all_posts:
         return {"brand": brand, "error": "No mentions found"}
 
-    # Save mentions
+    # Save mentions to database
     for post in all_posts:
         text = post["text"]
         source = post["source_name"]
@@ -146,17 +221,17 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
 
     all_texts = [p["text"] for p in all_posts]
 
-    # Engine 2 — Understanding
-    print(f"[Analyze] Running AI understanding on {len(all_texts)} posts...")
+    # ── Engine 2: Understanding ───────────────────────────────────────────────
+    logger.info(f"[Analyze] Running AI understanding on {len(all_texts)} posts...")
     ai_result = analyze_with_ai(brand, all_texts, entity_type)
     time.sleep(4)
 
-    # Engine 3 — Actors
-    print(f"[Analyze] Running actor analysis...")
+    # ── Engine 3: Actor Intelligence ──────────────────────────────────────────
+    logger.info(f"[Analyze] Running actor analysis...")
     actor_result = analyze_actors(brand, all_posts)
     time.sleep(4)
 
-    # Save score
+    # Save reputation score to history
     sentiment_counts = {
         "positive": ai_result["sentiment"]["positive_count"],
         "negative": ai_result["sentiment"]["negative_count"],
@@ -165,23 +240,23 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     score = ai_result["sentiment"]["score"]
     save_result(brand, sentiment_counts, score)
 
-    # Engine 4 — Prediction
-    print(f"[Analyze] Running prediction...")
+    # ── Engine 4: Prediction ──────────────────────────────────────────────────
+    logger.info(f"[Analyze] Running prediction...")
     prediction = predict_trajectory(brand)
 
     result = {
-        "brand": brand,
-        "entity_type": entity_type,
-        "mentions": len(all_posts),
-        "sources": source_counts,
+        "brand":            brand,
+        "entity_type":      entity_type,
+        "mentions":         len(all_posts),
+        "sources":          source_counts,
         "reputation_score": score,
-        "sentiment": ai_result["sentiment"],
-        "topics": ai_result["topics"],
-        "narrative": ai_result["narrative"],
-        "signals": ai_result["signals"],
-        "summary": ai_result["summary"],
-        "actors": actor_result,
-        "prediction": prediction,
+        "sentiment":        ai_result["sentiment"],
+        "topics":           ai_result["topics"],
+        "narrative":        ai_result["narrative"],
+        "signals":          ai_result["signals"],
+        "summary":          ai_result["summary"],
+        "actors":           actor_result,
+        "prediction":       prediction,
         "served_from_cache": False
     }
 
@@ -189,9 +264,11 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     return result
 
 
+# ── /playbook ─────────────────────────────────────────────────────────────────
+
 @app.get("/playbook")
 def playbook(brand: str, entity_type: str = "brand", description: str = ""):
-    print(f"[Playbook] Generating for: {brand} ({entity_type})")
+    logger.info(f"[Playbook] Generating for: {brand} ({entity_type})")
 
     if not description:
         description = get_entity_description(brand)
@@ -222,13 +299,13 @@ def playbook(brand: str, entity_type: str = "brand", description: str = ""):
 
     analysis = {
         "reputation_score": score,
-        "sentiment": ai_result["sentiment"],
-        "narrative": ai_result["narrative"],
-        "signals": ai_result["signals"],
-        "summary": ai_result["summary"]
+        "sentiment":        ai_result["sentiment"],
+        "narrative":        ai_result["narrative"],
+        "signals":          ai_result["signals"],
+        "summary":          ai_result["summary"]
     }
 
-    print(f"[Playbook] Running action engine...")
+    logger.info(f"[Playbook] Running Engine 5 — Action...")
     action_plan = generate_playbook(
         entity=brand,
         entity_type=entity_type,
@@ -238,14 +315,16 @@ def playbook(brand: str, entity_type: str = "brand", description: str = ""):
     )
 
     return {
-        "brand": brand,
-        "entity_type": entity_type,
-        "reputation_score": score,
-        "risk_level": prediction.get("risk_level"),
+        "brand":              brand,
+        "entity_type":        entity_type,
+        "reputation_score":   score,
+        "risk_level":         prediction.get("risk_level"),
         "crisis_probability": prediction.get("crisis_probability"),
-        "playbook": action_plan
+        "playbook":           action_plan
     }
 
+
+# ── /history ──────────────────────────────────────────────────────────────────
 
 @app.get("/history")
 def history(brand: str):
@@ -255,7 +334,7 @@ def history(brand: str):
         return {"brand": brand, "history": [], "trend": "no_data"}
 
     scores = [d["score"] for d in data]
-    delta = scores[0] - scores[-1] if len(scores) >= 2 else 0
+    delta  = scores[0] - scores[-1] if len(scores) >= 2 else 0
 
     if delta >= 10:
         trend = "improving"
@@ -265,22 +344,23 @@ def history(brand: str):
         trend = "stable"
 
     return {
-        "brand": brand,
+        "brand":         brand,
         "current_score": scores[0],
-        "trend": trend,
-        "score_delta": delta,
-        "history": data
+        "trend":         trend,
+        "score_delta":   delta,
+        "history":       data
     }
 
 
+# ── /alerts ───────────────────────────────────────────────────────────────────
+
 @app.get("/alerts")
 def get_alerts():
-    from database import get_all_entities
-    entities = get_all_entities()
+    entities   = get_all_entities()
     all_alerts = []
 
     for entity_data in entities:
-        entity = entity_data["name"] if isinstance(entity_data, dict) else entity_data
+        entity     = entity_data["name"] if isinstance(entity_data, dict) else entity_data
         prediction = predict_trajectory(entity)
         urgency_alerts = [
             a for a in prediction.get("alerts", [])
@@ -289,54 +369,59 @@ def get_alerts():
 
         if urgency_alerts:
             all_alerts.append({
-                "entity": entity,
-                "current_score": prediction.get("current_score"),
-                "risk_level": prediction.get("risk_level"),
+                "entity":             entity,
+                "current_score":      prediction.get("current_score"),
+                "risk_level":         prediction.get("risk_level"),
                 "crisis_probability": prediction.get("crisis_probability"),
-                "alerts": urgency_alerts
+                "alerts":             urgency_alerts
             })
 
     return {
         "total_entities_monitored": len(entities),
-        "entities_with_alerts": len(all_alerts),
-        "alerts": all_alerts
+        "entities_with_alerts":     len(all_alerts),
+        "alerts":                   all_alerts
     }
 
 
+# ── /status ───────────────────────────────────────────────────────────────────
+
 @app.get("/status")
 def status():
-    from database import get_all_entities
-    entities = get_all_entities()
-
+    entities      = get_all_entities()
+    quota_status  = get_youtube_quota_status()  # B3 — quota visibility
     entity_status = []
+
     for entity_data in entities:
         entity = entity_data["name"] if isinstance(entity_data, dict) else entity_data
         cached = get_analysis_cache(entity, max_age_minutes=9999)
         entity_status.append({
-            "entity": entity,
-            "type": entity_data.get("type", "brand") if isinstance(entity_data, dict) else "brand",
+            "entity":      entity,
+            "type":        entity_data.get("type", "brand") if isinstance(entity_data, dict) else "brand",
             "description": entity_data.get("description", "") if isinstance(entity_data, dict) else "",
-            "cache": "fresh" if cached else "stale"
+            "cache":       "fresh" if cached else "stale"
         })
 
     return {
-        "monitor": "active",
-        "schedule": "News every 2 hours | YouTube every 2 hours",
-        "entities": entity_status
+        "monitor":        "active",
+        "schedule":       "News every 2 hours | YouTube every 2 hours",
+        "youtube_quota":  quota_status,   # B3 — now visible in /status
+        "entities":       entity_status
     }
 
 
+# ── /add_entity ───────────────────────────────────────────────────────────────
+
 @app.post("/add_entity")
 def add_entity_api(
-    name: str,
+    name:        str,
     entity_type: str = "brand",
     description: str = ""
 ):
     add_entity(name, entity_type, description)
     return {
-        "message": f"'{name}' added to ReputationSync monitoring",
-        "name": name,
+        "message":     f"'{name}' added to ReputationSync monitoring",
+        "name":        name,
         "entity_type": entity_type,
         "description": description,
-        "monitoring": "active"
+        "monitoring":  "active"
     }
