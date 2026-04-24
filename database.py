@@ -93,6 +93,53 @@ def init_db():
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
 
+        # language_baseline — weekly rolling pattern per entity
+    # Stores what "normal" looks like so Engine 0 can detect deviation
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS language_baseline (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity TEXT,
+        window_date TEXT,
+        common_phrases JSON,
+        topic_clusters JSON,
+        source_mix JSON,
+        tone_baseline REAL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # narrative_formation — early signal hypotheses before mainstream pickup
+    # Tracks whether hypotheses were correct (powers learning loop later)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS narrative_formation (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity TEXT,
+        hypothesis TEXT,
+        confidence REAL,
+        first_detected TIMESTAMP,
+        stage TEXT,
+        origin_type TEXT,
+        source_count INTEGER,
+        time_to_surface INTEGER,
+        confirmed INTEGER DEFAULT 0,
+        confirmed_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # control_score_history — narrative control score over time
+    # Tracks how much control the brand has over the narrative per cycle
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS control_score_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity TEXT,
+        control_score REAL,
+        origin_score REAL,
+        velocity_score REAL,
+        rigidity_score REAL,
+        defender_score REAL,
+        intervention_window TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+
     # Migration guard — adds description column if upgrading from older schema
     try:
         cursor.execute("ALTER TABLE entities ADD COLUMN description TEXT")
@@ -530,3 +577,207 @@ def get_youtube_quota_status() -> dict:
         "resets_at":     "Midnight Pacific Time (UTC-7)",
         "date_pacific":  _get_pacific_date()
     }
+# ── Narrative Formation Storage ───────────────────────────────────────────────
+
+def save_formation_signal(entity: str, hypothesis: str, confidence: float,
+                           stage: str, origin_type: str, source_count: int,
+                           time_to_surface: int):
+    """
+    Saves an early narrative formation hypothesis.
+    Called by Engine 0 (engine_formation.py) when deviation detected.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        INSERT INTO narrative_formation
+        (entity, hypothesis, confidence, first_detected,
+         stage, origin_type, source_count, time_to_surface)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+        """, (entity, hypothesis, confidence, stage,
+              origin_type, source_count, time_to_surface))
+        conn.commit()
+        print(f"[Formation] Signal saved for '{entity}': {stage} / {confidence}% confidence")
+    except Exception as e:
+        print(f"[Formation] Save error for '{entity}': {e}")
+    finally:
+        conn.close()
+
+
+def get_latest_formation(entity: str) -> dict | None:
+    """
+    Returns the most recent formation signal for an entity.
+    Used by /analyze to include formation data in full report.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        SELECT entity, hypothesis, confidence, first_detected,
+               stage, origin_type, source_count, time_to_surface,
+               confirmed, created_at
+        FROM narrative_formation
+        WHERE entity = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """, (entity,))
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        return {
+            "entity":            row[0],
+            "hypothesis":        row[1],
+            "confidence":        row[2],
+            "first_detected":    row[3],
+            "stage":             row[4],
+            "origin_type":       row[5],
+            "source_count":      row[6],
+            "time_to_surface":   row[7],
+            "confirmed":         bool(row[8]),
+            "created_at":        row[9]
+        }
+    except Exception as e:
+        print(f"[Formation] Read error for '{entity}': {e}")
+        return None
+    finally:
+        conn.close()
+
+
+# ── Control Score Storage ─────────────────────────────────────────────────────
+
+def save_control_score(entity: str, control_score: float, origin_score: float,
+                        velocity_score: float, rigidity_score: float,
+                        defender_score: float, intervention_window: str):
+    """
+    Saves narrative control score snapshot.
+    Called every monitoring cycle after Engine 2 and Engine 3 complete.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        INSERT INTO control_score_history
+        (entity, control_score, origin_score, velocity_score,
+         rigidity_score, defender_score, intervention_window)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (entity, control_score, origin_score, velocity_score,
+              rigidity_score, defender_score, intervention_window))
+        conn.commit()
+        print(f"[Control] Score saved for '{entity}': {control_score}/100 — window: {intervention_window}")
+    except Exception as e:
+        print(f"[Control] Save error for '{entity}': {e}")
+    finally:
+        conn.close()
+
+
+def get_latest_control_score(entity: str) -> dict | None:
+    """
+    Returns most recent control score for an entity.
+    Used by /analyze to include control score in full report.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        SELECT entity, control_score, origin_score, velocity_score,
+               rigidity_score, defender_score, intervention_window,
+               created_at
+        FROM control_score_history
+        WHERE entity = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """, (entity,))
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        return {
+            "entity":               row[0],
+            "control_score":        row[1],
+            "origin_score":         row[2],
+            "velocity_score":       row[3],
+            "rigidity_score":       row[4],
+            "defender_score":       row[5],
+            "intervention_window":  row[6],
+            "created_at":           row[7]
+        }
+    except Exception as e:
+        print(f"[Control] Read error for '{entity}': {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_language_baseline(entity: str) -> dict | None:
+    """
+    Returns the most recent language baseline for an entity.
+    Used by Engine 0 to compare current patterns against normal.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        SELECT entity, window_date, common_phrases,
+               topic_clusters, source_mix, tone_baseline
+        FROM language_baseline
+        WHERE entity = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """, (entity,))
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        return {
+            "entity":          row[0],
+            "window_date":     row[1],
+            "common_phrases":  json.loads(row[2]) if row[2] else [],
+            "topic_clusters":  json.loads(row[3]) if row[3] else [],
+            "source_mix":      json.loads(row[4]) if row[4] else {},
+            "tone_baseline":   row[5]
+        }
+    except Exception as e:
+        print(f"[Baseline] Read error for '{entity}': {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def save_language_baseline(entity: str, common_phrases: list,
+                            topic_clusters: list, source_mix: dict,
+                            tone_baseline: float):
+    """
+    Saves weekly language baseline for an entity.
+    Built from the last 7 days of mentions.
+    Called by Engine 0 on a weekly schedule.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        window_date = datetime.utcnow().strftime("%Y-%m-%d")
+        cursor.execute("""
+        INSERT INTO language_baseline
+        (entity, window_date, common_phrases,
+         topic_clusters, source_mix, tone_baseline)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (entity, window_date,
+              json.dumps(common_phrases),
+              json.dumps(topic_clusters),
+              json.dumps(source_mix),
+              tone_baseline))
+        conn.commit()
+        print(f"[Baseline] Saved for '{entity}' — window: {window_date}")
+    except Exception as e:
+        print(f"[Baseline] Save error for '{entity}': {e}")
+    finally:
+        conn.close()
