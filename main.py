@@ -14,6 +14,7 @@ from engine_understanding import analyze_with_ai
 from engine_actors import analyze_actors
 from engine_prediction import predict_trajectory
 from engine_action import generate_playbook
+from engine_control_score import calculate_control_score
 from database import (
     init_db,
     save_result,
@@ -240,6 +241,15 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     score = ai_result["sentiment"]["score"]
     save_result(brand, sentiment_counts, score)
 
+    # ── Engine 6: Narrative Control Score ─────────────────────────────────────
+    logger.info(f"[Analyze] Calculating narrative control score...")
+    control_score = calculate_control_score(
+        entity=brand,
+        engine2_result=ai_result,
+        engine3_result=actor_result,
+        formation_result=None  # Formation engine added in later step
+    )
+
     # ── Engine 4: Prediction ──────────────────────────────────────────────────
     logger.info(f"[Analyze] Running prediction...")
     prediction = predict_trajectory(brand, ai_result, actor_result)
@@ -256,6 +266,7 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
         "signals":          ai_result["signals"],
         "summary":          ai_result["summary"],
         "actors":           actor_result,
+        "control":          control_score,
         "prediction":       prediction,
         "served_from_cache": False
     }
@@ -325,6 +336,15 @@ def playbook(brand: str, entity_type: str = "brand", description: str = ""):
         "summary":          ai_result.get("summary", ""),
     }
 
+        # ── Engine 6: Narrative Control Score ─────────────────────────────────────
+    logger.info(f"[Playbook] Calculating narrative control score...")
+    control_score = calculate_control_score(
+        entity=brand,
+        engine2_result=ai_result,
+        engine3_result=actor_result,
+        formation_result=None  # Formation engine added in later step
+    )
+
     logger.info(f"[Playbook] Running Engine 5 — Action...")
     action_plan = generate_playbook(
         entity=brand,
@@ -340,6 +360,7 @@ def playbook(brand: str, entity_type: str = "brand", description: str = ""):
         "reputation_score":   score,
         "risk_level":         prediction.get("risk_level"),
         "crisis_probability": prediction.get("crisis_probability"),
+        "control":            control_score,
         "playbook":           action_plan
     }
 
