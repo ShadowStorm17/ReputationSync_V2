@@ -127,7 +127,7 @@ def calculate_control_score(entity: str, engine2_result: dict,
     }
 
     # ── Save to DB ────────────────────────────────────────────────────────────
-    try:
+    '''try:
         database.save_control_score(
             entity=entity,
             control_score=total,
@@ -138,7 +138,7 @@ def calculate_control_score(entity: str, engine2_result: dict,
             intervention_window=window
         )
     except Exception as e:
-        logger.error(f"[Control] DB save failed for '{entity}': {e}")
+        logger.error(f"[Control] DB save failed for '{entity}': {e}")'''
 
     logger.info(
         f"[Control] '{entity}' scored {total}/100 | "
