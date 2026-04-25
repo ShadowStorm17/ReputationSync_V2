@@ -132,16 +132,42 @@ ACTOR ENGAGEMENT RULES BY TYPE — FOLLOW STRICTLY:
 # ── JSON Cleaner ──────────────────────────────────────────────────────────────
 
 def clean_json(raw: str) -> str:
+    """
+    Aggressively cleans Groq JSON formatting issues.
+    Handles code blocks, trailing commas, truncation,
+    control characters, and unterminated strings.
+    """
+    # Strip markdown code blocks
     if "```" in raw:
         parts = raw.split("```")
         raw = parts[1] if len(parts) > 1 else raw
         if raw.startswith("json"):
             raw = raw[4:]
+
     raw = raw.strip()
+
+    # Remove trailing commas before closing brackets
     raw = re.sub(r",\s*}", "}", raw)
     raw = re.sub(r",\s*]", "]", raw)
-    return raw
 
+    # Remove control characters
+    raw = re.sub(r'[\x00-\x1f\x7f]', ' ', raw)
+
+    # Fix single quotes used as JSON string delimiters
+    raw = re.sub(r":\s*'([^']*)'", r': "\1"', raw)
+
+    # Attempt to close truncated JSON
+    open_braces  = raw.count('{')
+    close_braces = raw.count('}')
+    if open_braces > close_braces:
+        raw += '}' * (open_braces - close_braces)
+
+    open_brackets  = raw.count('[')
+    close_brackets = raw.count(']')
+    if open_brackets > close_brackets:
+        raw += ']' * (open_brackets - close_brackets)
+
+    return raw
 
 # ── Scenario Formatter ────────────────────────────────────────────────────────
 
@@ -347,8 +373,19 @@ Return ONLY valid JSON — no explanation, no markdown:
         raw = generate(prompt)
         raw = clean_json(raw)
         return json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.warning(f"[Action] Call 1 JSON parse failed for '{entity}': {e}")
+        # Attempt regex extraction as fallback
+        try:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except Exception:
+            pass
+        logger.error(f"[Action] Call 1 completely failed for '{entity}' — returning empty")
+        return {}
     except Exception as e:
-        logger.error(f"[Action] Call 1 failed for '{entity}': {e}")
+        logger.error(f"[Action] Call 1 unexpected error for '{entity}': {e}")
         return {}
 
 
@@ -500,10 +537,19 @@ Return ONLY valid JSON — no explanation, no markdown:
         raw = generate(prompt)
         raw = clean_json(raw)
         return json.loads(raw)
-    except Exception as e:
-        logger.error(f"[Action] Call 2 failed for '{entity}': {e}")
+    except json.JSONDecodeError as e:
+        logger.warning(f"[Action] Call 2 JSON parse failed for '{entity}': {e}")
+        try:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except Exception:
+            pass
+        logger.error(f"[Action] Call 2 completely failed for '{entity}' — returning empty")
         return {}
-
+    except Exception as e:
+        logger.error(f"[Action] Call 2 unexpected error for '{entity}': {e}")
+        return {}
 
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
