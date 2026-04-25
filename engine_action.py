@@ -13,6 +13,8 @@
 # Fix 4 — Week-specific success metrics (each week measurably different)
 # Fix 5 — what_not_to_do tied to confirmed crisis indicators
 # Fix 6 — Key messages specific enough to be spoken directly to press
+# Upgrade 1 — Control score + intervention window fed into prompts
+# Upgrade 2 — Trajectory scenarios + escalation triggers fed into prompts
 # ============================================================
 
 import os
@@ -141,6 +143,26 @@ def clean_json(raw: str) -> str:
     return raw
 
 
+# ── Scenario Formatter ────────────────────────────────────────────────────────
+
+def _format_scenarios(scenario_paths: dict) -> str:
+    """Formats trajectory scenarios for the situation briefing."""
+    if not scenario_paths:
+        return "No scenario data"
+
+    lines = []
+    for case, data in scenario_paths.items():
+        if isinstance(data, dict):
+            lines.append(
+                f"{case.replace('_', ' ').title()}: "
+                f"{data.get('probability', '?')}% probability | "
+                f"Score at day 30: {data.get('score_at_day_30', '?')}/100"
+            )
+            conditions = data.get('conditions', 'N/A')
+            lines.append(f"  Conditions: {conditions[:200]}")
+    return "\n".join(lines) if lines else "No scenario data"
+
+
 # ── Situation Block Builder ───────────────────────────────────────────────────
 
 def build_situation_block(
@@ -148,7 +170,13 @@ def build_situation_block(
     sentiment, summary, top_actors, critics, defenders,
     neutral, primary_driver, crisis_prob, trajectory,
     risk_level, alerts, forecast, recommendation,
-    estimated_score
+    estimated_score, control_score=50,
+    intervention_window="narrowing",
+    control_interpretation="",
+    scenario_paths=None,
+    escalation_triggers=None,
+    momentum_velocity="steady",
+    narrative_window=""
 ) -> str:
     actor_block = ""
     for a in top_actors:
@@ -169,6 +197,10 @@ def build_situation_block(
 ENTITY: {entity} ({entity_type})
 SCORE: {score}/100 | RISK: {risk_level.upper()} | CRISIS PROBABILITY: {crisis_prob}%
 TRAJECTORY: {trajectory} | SCORE IN 7 DAYS IF NO ACTION: {estimated_score}/100
+
+NARRATIVE CONTROL SCORE: {control_score}/100
+INTERVENTION WINDOW: {intervention_window.upper()}
+CONTROL INTERPRETATION: {control_interpretation}
 
 ENTITY TYPE CONTEXT: {type_context}
 
@@ -193,6 +225,15 @@ DEFENDERS (supporting entity): {", ".join(defenders) if defenders else "NONE —
 NEUTRAL (convertible): {", ".join(neutral) if neutral else "None"}
 PRIMARY NARRATIVE DRIVER: {primary_driver or "Unknown"}
 
+TRAJECTORY SCENARIOS:
+{_format_scenarios(scenario_paths) if scenario_paths else "No trajectory data"}
+
+ESCALATION TRIGGERS (specific events that move worst case from possible to probable):
+{chr(10).join(f"- {t}" for t in (escalation_triggers or [])) or "None identified"}
+
+MOMENTUM VELOCITY: {momentum_velocity.upper()}
+NARRATIVE WINDOW: {narrative_window or "Insufficient data"}
+
 ACTIVE ALERTS:
 {chr(10).join(f"- [{a.get('urgency','').upper()}] {a.get('description','')}" for a in alerts) or "None"}
 
@@ -209,11 +250,18 @@ def call_immediate_actions(
     entity_type: str,
     score: int,
     risk_level: str,
-    crisis_prob: int
+    crisis_prob: int,
+    intervention_window: str = "narrowing",
+    escalation_triggers: list = None
 ) -> dict:
     tier = CRISIS_TIER_INSTRUCTIONS.get(
         risk_level.lower(), CRISIS_TIER_INSTRUCTIONS["medium"]
     )
+
+    trigger_count = len(escalation_triggers or [])
+    trigger_text = "\n".join(
+        f"  - {t}" for t in (escalation_triggers or [])
+    ) or "None identified"
 
     prompt = f"""You are the world's most elite reputation crisis strategist.
 A client needs an emergency action plan right now.
@@ -233,11 +281,19 @@ RULES — FOLLOW EXACTLY:
 5. if_ignored = specific consequence referencing the actual actor or indicator affected
 6. score_impact = realistic score change (e.g. "+3 to +6 points")
 7. Actor engagement approach must match actor TYPE using engagement rules above
-8. Forums (Hacker News, Reddit) NEVER receive interview or press briefing suggestions
-9. repercussion_if_ignored must name the specific actor and their likely next move
-10. HALLUCINATION GUARD: Never invent product names, projects, initiatives, or events
+8. TIMING SENSITIVITY: Intervention window is {intervention_window.upper()}.
+   If CLOSED: front-load all actions into first 24-48 hours — window is nearly gone.
+   If NARROWING: specify exact hour deadlines for first 2 actions.
+   If OPEN: act within 7 days maximum but prioritise highest-leverage actions first.
+9. ESCALATION AWARENESS: {trigger_count} specific escalation trigger(s) identified:
+{trigger_text}
+   Address at least one trigger directly in immediate actions.
+   Reference triggers by name when explaining if_ignored consequences.
+10. Forums (Hacker News, Reddit) NEVER receive interview or press briefing suggestions
+11. repercussion_if_ignored must name the specific actor and their likely next move
+12. HALLUCINATION GUARD: Never invent product names, projects, initiatives, or events
     not in the CONFIRMED signals above. Work only with what is in the briefing.
-11. KEY MESSAGES must be complete sentences a spokesperson can say directly to camera.
+13. KEY MESSAGES must be complete sentences a spokesperson can say directly to camera.
     Not topics. Not themes. Actual quotable statements grounded in confirmed facts.
     Bad example: "We are addressing the lawsuit."
     Good example: "We are cooperating fully with the SEC investigation and have
@@ -261,16 +317,16 @@ Return ONLY valid JSON — no explanation, no markdown:
     }}
   ],
   "narrative_strategy": {{
-    "counter_narrative": "<specific story using only CONFIRMED positive signals — no invented claims>",
+    "counter_narrative": "<specific story using only CONFIRMED positive signals>",
     "key_messages": [
-      "<complete quotable sentence — spokesperson reads this directly to press, references confirmed fact>",
-      "<complete quotable sentence — directly addresses a named confirmed crisis indicator honestly>",
+      "<complete quotable sentence — spokesperson reads this directly to press>",
+      "<complete quotable sentence — directly addresses a named confirmed crisis indicator>",
       "<complete quotable sentence — forward-looking, grounded in confirmed signals only>"
     ],
     "what_to_avoid": [
-      "<specific communication trap tied to a confirmed crisis indicator — not generic advice>"
+      "<specific communication trap tied to a confirmed crisis indicator>"
     ],
-    "reframe": "<how to reframe the specific confirmed negative narrative — use real language>",
+    "reframe": "<how to reframe the specific confirmed negative narrative>",
     "tone_guidance": "<how {entity} should sound given crisis level and entity type>"
   }},
   "actor_engagement": [
@@ -305,7 +361,8 @@ def call_recovery_plan(
     score: int,
     risk_level: str,
     crisis_prob: int,
-    trajectory: str
+    trajectory: str,
+    scenario_paths: dict = None
 ) -> dict:
     max_realistic  = min(100, score + 20)
     max_optimistic = min(100, score + 30)
@@ -317,6 +374,12 @@ def call_recovery_plan(
     else:
         if_no_action = max(0, score - 2)
 
+    most_likely_score = "?"
+    if scenario_paths and isinstance(scenario_paths, dict):
+        most_likely = scenario_paths.get("most_likely", {})
+        if isinstance(most_likely, dict):
+            most_likely_score = most_likely.get("score_at_day_30", "?")
+
     prompt = f"""You are the world's most elite reputation crisis strategist.
 You are building the 30-day recovery plan for a client in a {risk_level} risk situation.
 
@@ -326,9 +389,9 @@ INTELLIGENCE BRIEFING:
 {situation}
 
 RULES — FOLLOW EXACTLY:
-1. Content plan titles must be actual publishable headlines specific to {entity} — not placeholders
+1. Content plan titles must be actual publishable headlines specific to {entity}
 2. what_not_to_do must reference CONFIRMED crisis indicators — not generic PR rules
-3. Spokesperson talking points must be complete press-ready sentences — not topics or themes
+3. Spokesperson talking points must be complete press-ready sentences — not topics
 4. Media Q&A questions must be ones journalists would ask based on CONFIRMED crisis indicators
 5. 30-day plan weeks 1 and 2 must be heavily front-loaded with specific actions
 6. SUCCESS METRICS MUST BE DIFFERENT FOR EACH WEEK AND SPECIFIC:
@@ -343,9 +406,9 @@ RULES — FOLLOW EXACTLY:
    - realistic_30_day_target: {max_realistic} exactly
    - optimistic_30_day_target: {max_optimistic} exactly
    - if_no_action: {if_no_action} or lower given {trajectory} trajectory
-8. what_not_to_do actions must be specific to {entity}'s CONFIRMED situation:
-   Reference actual crisis indicators by name. Explain the specific mechanism
-   by which the mistake amplifies the confirmed problem.
+   - TRAJECTORY CONTEXT: Most likely scenario predicts score at day 30 will be {most_likely_score}/100
+   - Your realistic target should align with or exceed the most_likely trajectory prediction
+8. what_not_to_do actions must be specific to {entity}'s CONFIRMED situation
 9. HALLUCINATION GUARD: Never invent product names, projects, initiatives,
    or events not in the CONFIRMED signals above.
 
@@ -354,27 +417,27 @@ Return ONLY valid JSON — no explanation, no markdown:
   "content_plan": [
     {{
       "type": "<press release or blog post or social thread or video or interview or op-ed>",
-      "title": "<actual publishable headline specific to {entity}'s real confirmed situation>",
+      "title": "<actual publishable headline specific to {entity}'s confirmed situation>",
       "angle": "<specific hook tied to a CONFIRMED positive signal>",
       "platform": "<exact platform or publication name>",
       "timing": "<when and specifically why>",
-      "expected_reach": "<who this reaches and why it matters for the narrative>",
-      "narrative_friction_reduction": "<which specific confirmed Narrative Friction this removes>"
+      "expected_reach": "<who this reaches and why it matters>",
+      "narrative_friction_reduction": "<which specific confirmed narrative friction this removes>"
     }}
   ],
   "what_not_to_do": [
     {{
-      "action": "<specific action {entity} must avoid — written as something {entity} might actually do, e.g. 'Publicly dismiss the SEC lawsuit as politically motivated'>",
+      "action": "<specific action {entity} must avoid>",
       "reason": "<exact mechanism by which this amplifies a named confirmed crisis indicator>",
       "risk": "<specific outlet or actor likely to escalate and how>"
     }}
-  ],,
+  ],
   "spokesperson_guidance": {{
-    "recommended_spokesperson": "<who should speak and why — specific to {entity}'s situation>",
+    "recommended_spokesperson": "<who should speak and why>",
     "talking_points": [
-      "<press-ready sentence 1 — spokesperson reads this verbatim, references confirmed fact>",
-      "<press-ready sentence 2 — addresses confirmed crisis indicator directly and honestly>",
-      "<press-ready sentence 3 — forward-looking, grounded in confirmed positive signals only>"
+      "<press-ready sentence 1 — references confirmed fact>",
+      "<press-ready sentence 2 — addresses confirmed crisis indicator directly>",
+      "<press-ready sentence 3 — forward-looking, grounded in confirmed signals>"
     ],
     "what_not_to_say": [
       "<specific phrase that would amplify a named confirmed crisis indicator>"
@@ -399,19 +462,19 @@ Return ONLY valid JSON — no explanation, no markdown:
       "week": 1,
       "focus": "Crisis containment — stop the bleeding",
       "actions": ["<specific action>", "<specific action>", "<specific action>"],
-      "success_metric": "<containment metric — specific and measurable, not generic>"
+      "success_metric": "<containment metric — specific and measurable>"
     }},
     {{
       "week": 2,
       "focus": "Narrative launch — introduce the counter-story",
       "actions": ["<specific action>", "<specific action>", "<specific action>"],
-      "success_metric": "<narrative shift metric — different from week 1, specific>"
+      "success_metric": "<narrative shift metric — different from week 1>"
     }},
     {{
       "week": 3,
       "focus": "Actor conversion — move neutral outlets to defender",
       "actions": ["<specific action>", "<specific action>"],
-      "success_metric": "<actor conversion metric — names a specific outlet or forum>"
+      "success_metric": "<actor conversion metric — names a specific outlet>"
     }},
     {{
       "week": 4,
@@ -426,7 +489,7 @@ Return ONLY valid JSON — no explanation, no markdown:
     "optimistic_30_day_target": {max_optimistic},
     "if_no_action": {if_no_action},
     "key_milestones": [
-      "<specific confirmed action that must happen for score to reach {max_realistic}>",
+      "<specific action that must happen for score to reach {max_realistic}>",
       "<second milestone tied to confirmed actors or signals>",
       "<third milestone>"
     ]
@@ -449,12 +512,14 @@ def generate_playbook(
     entity_type: str,
     analysis: dict,
     actors: dict,
-    prediction: dict
+    prediction: dict,
+    control: dict = None,
+    trajectory: dict = None
 ) -> dict:
     """
     Engine 5 — Generates full prescriptive action playbook.
     Two focused Groq calls merged into one complete playbook.
-    All six quality fixes applied.
+    Now upgraded with control score and trajectory scenario signals.
     """
     if not analysis or not prediction:
         return _empty_result()
@@ -473,35 +538,63 @@ def generate_playbook(
     primary_driver  = actors.get("primary_driver_source", "")
 
     crisis_prob     = prediction.get("crisis_probability", 0)
-    trajectory      = prediction.get("trajectory", "stable")
+    trajectory_dir  = prediction.get("trajectory", "stable")
     risk_level      = prediction.get("risk_level", "low")
     alerts          = prediction.get("alerts", [])
     forecast        = prediction.get("forecast_7_days", "")
     recommendation  = prediction.get("recommendation", "")
     estimated_score = prediction.get("estimated_score_in_7_days", score)
 
+    # ── Extract Control Score ─────────────────────────────────────────────────
+    control_score          = 50
+    intervention_window    = "narrowing"
+    control_interpretation = ""
+    if control and isinstance(control, dict):
+        control_score          = control.get("narrative_control_score", 50)
+        intervention_window    = control.get("intervention_window", "narrowing")
+        control_interpretation = control.get("control_interpretation", "")
+
+    # ── Extract Trajectory Scenarios ──────────────────────────────────────────
+    scenario_paths      = {}
+    escalation_triggers = []
+    momentum_velocity   = "steady"
+    narrative_window    = ""
+    if trajectory and isinstance(trajectory, dict):
+        scenario_paths      = trajectory.get("scenario_paths", {})
+        escalation_triggers = trajectory.get("escalation_triggers", [])
+        momentum_velocity   = trajectory.get("momentum_velocity", "steady")
+        narrative_window    = trajectory.get("narrative_window", "")
+
     # ── Build Shared Situation Block ──────────────────────────────────────────
     situation = build_situation_block(
         entity, entity_type, score, narrative, signals,
         sentiment, summary, top_actors, critics, defenders,
-        neutral, primary_driver, crisis_prob, trajectory,
+        neutral, primary_driver, crisis_prob, trajectory_dir,
         risk_level, alerts, forecast, recommendation,
-        estimated_score
+        estimated_score, control_score, intervention_window,
+        control_interpretation, scenario_paths, escalation_triggers,
+        momentum_velocity, narrative_window
     )
 
     # ── Call 1: Immediate Actions + Actor Engagement ──────────────────────────
     logger.info(
         f"[Action] Call 1 — Immediate actions for '{entity}' | "
-        f"Risk: {risk_level} | Score: {score}"
+        f"Risk: {risk_level} | Score: {score} | "
+        f"Control: {control_score}/100 | Window: {intervention_window}"
     )
     part1 = call_immediate_actions(
-        situation, entity, entity_type, score, risk_level, crisis_prob
+        situation, entity, entity_type, score, risk_level,
+        crisis_prob, intervention_window, escalation_triggers
     )
 
     # ── Call 2: Recovery Plan + Spokesperson + Forecast ───────────────────────
-    logger.info(f"[Action] Call 2 — Recovery plan for '{entity}'")
+    logger.info(
+        f"[Action] Call 2 — Recovery plan for '{entity}' | "
+        f"Trajectory: {trajectory_dir} | Scenarios: {len(scenario_paths)}"
+    )
     part2 = call_recovery_plan(
-        situation, entity, entity_type, score, risk_level, crisis_prob, trajectory
+        situation, entity, entity_type, score, risk_level,
+        crisis_prob, trajectory_dir, scenario_paths
     )
 
     # ── Merge ─────────────────────────────────────────────────────────────────
@@ -528,6 +621,8 @@ def generate_playbook(
         "based_on_score":     score,
         "based_on_risk":      risk_level,
         "crisis_probability": crisis_prob,
+        "control_score":      control_score,
+        "intervention_window": intervention_window,
     }
 
     logger.info(

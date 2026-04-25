@@ -364,9 +364,10 @@ def playbook(brand: str, entity_type: str = "brand", description: str = ""):
         entity_type=entity_type,
         analysis=analysis,
         actors=actor_result,
-        prediction=prediction
+        prediction=prediction,
+        control=control_score,
+        trajectory=None
     )
-
     return {
         "brand":              brand,
         "entity_type":        entity_type,
