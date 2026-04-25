@@ -242,7 +242,7 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     score = ai_result["sentiment"]["score"]
     save_result(brand, sentiment_counts, score)
 
-    # ── Engine 6: Narrative Control Score ─────────────────────────────────────
+        # ── Engine 6: Narrative Control Score ─────────────────────────────────────
     logger.info(f"[Analyze] Calculating narrative control score...")
     control_score = calculate_control_score(
         entity=brand,
@@ -250,6 +250,17 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
         engine3_result=actor_result,
         formation_result=None  # Formation engine added in later step
     )
+
+    # ── Engine 7: Narrative Trajectory Model ──────────────────────────────────
+    logger.info(f"[Analyze] Modeling narrative trajectory...")
+    trajectory = model_trajectory(
+        entity=brand,
+        entity_type=entity_type,
+        engine2_result=ai_result,
+        engine3_result=actor_result,
+        control_result=control_score
+    )
+    time.sleep(4)
 
     # ── Engine 4: Prediction ──────────────────────────────────────────────────
     logger.info(f"[Analyze] Running prediction...")
@@ -268,6 +279,7 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
         "summary":          ai_result["summary"],
         "actors":           actor_result,
         "control":          control_score,
+        "trajectory":       trajectory,
         "prediction":       prediction,
         "served_from_cache": False
     }
