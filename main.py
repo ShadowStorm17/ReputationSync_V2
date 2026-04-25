@@ -10,6 +10,7 @@
 # ============================================================
 
 from fastapi import FastAPI
+from engine_trajectory import model_trajectory
 from engine_understanding import analyze_with_ai
 from engine_actors import analyze_actors
 from engine_prediction import predict_trajectory
