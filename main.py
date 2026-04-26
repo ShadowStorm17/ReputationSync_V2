@@ -11,6 +11,7 @@
 
 from fastapi import FastAPI
 from engine_trajectory import model_trajectory
+from engine_formation import detect_formation
 from engine_understanding import analyze_with_ai
 from engine_actors import analyze_actors
 from engine_prediction import predict_trajectory
@@ -251,6 +252,14 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
         formation_result=None  # Formation engine added in later step
     )
 
+       # ── Engine 0: Formation Detection ─────────────────────────────────────────
+    logger.info(f"[Analyze] Running formation detection...")
+    formation = detect_formation(
+        entity=brand,
+        current_posts=all_posts,
+        engine2_result=ai_result
+    )
+
     # ── Engine 7: Narrative Trajectory Model ──────────────────────────────────
     logger.info(f"[Analyze] Modeling narrative trajectory...")
     trajectory = model_trajectory(
@@ -280,6 +289,7 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
         "actors":           actor_result,
         "control":          control_score,
         "trajectory":       trajectory,
+        "formation":        formation,
         "prediction":       prediction,
         "served_from_cache": False
     }

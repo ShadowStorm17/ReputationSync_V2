@@ -9,11 +9,7 @@
 #   - 60s gap between entities to avoid API rate limits
 #
 # B3 FIX: YouTube quota tracking added.
-#   - Tracks daily API call count in database
-#   - Warns at 80% usage (8,000 / 10,000 units)
-#   - Gracefully skips YouTube when quota exhausted
-#   - Resets counter at midnight Pacific time (YouTube's reset)
-#   - Survives server restarts via persistent DB storage
+# Engine 0 (Formation Detection) added to monitoring cycle.
 # ============================================================
 
 import schedule
@@ -38,61 +34,38 @@ from filter import filter_relevant
 from engine_understanding import analyze_with_ai
 from engine_actors import analyze_actors
 from engine_prediction import predict_trajectory
+from engine_control_score import calculate_control_score
+from engine_trajectory import model_trajectory
+from engine_formation import detect_formation
 
 logger = logging.getLogger(__name__)
 
 # ── YouTube Quota Constants ──────────────────────────────────────────────────
-# YouTube Data API v3 gives 10,000 units per day.
-# Each search.list call costs 100 units.
-# With 5 entities × 12 runs/day = 60 calls = 6,000 units minimum.
-# Warning threshold at 80% to prevent silent exhaustion.
-
-YOUTUBE_DAILY_QUOTA = 10000  # units
-YOUTUBE_COST_PER_CALL = 100  # units per search.list
-YOUTUBE_WARNING_THRESHOLD = 0.80  # 80% = 8,000 units
+YOUTUBE_DAILY_QUOTA       = 10000
+YOUTUBE_COST_PER_CALL     = 100
+YOUTUBE_WARNING_THRESHOLD = 0.80
 
 
 def check_youtube_quota() -> bool:
-    """
-    B3 — YouTube Quota Check.
-
-    Returns True if YouTube API calls are allowed.
-    Returns False if quota is exhausted or near limit.
-
-    Checks:
-    1. Reset counter if new day (Pacific time — YouTube's reset zone)
-    2. Current usage vs daily quota
-    3. Log warning at 80% threshold
-
-    This prevents silent 403 errors and gives visibility into
-    when YouTube Listening will be unavailable.
-    """
-    # Reset counter if midnight Pacific has passed
     reset_youtube_quota_if_new_day()
-
-    # Get current usage from database
-    current_usage = get_youtube_quota_usage()
-    remaining_units = YOUTUBE_DAILY_QUOTA - current_usage
+    current_usage    = get_youtube_quota_usage()
+    remaining_units  = YOUTUBE_DAILY_QUOTA - current_usage
     usage_percentage = (current_usage / YOUTUBE_DAILY_QUOTA) * 100
 
-    # Log quota status for visibility
     logger.info(
         f"[YouTube Quota] Usage: {current_usage:,} / {YOUTUBE_DAILY_QUOTA:,} units "
         f"({usage_percentage:.1f}%) | Remaining: {remaining_units:,} units"
     )
 
-    # Warning at 80% threshold
     if usage_percentage >= (YOUTUBE_WARNING_THRESHOLD * 100) and usage_percentage < 100:
         logger.warning(
-            f"[YouTube Quota] ⚠️  WARNING: {usage_percentage:.1f}% of daily quota used. "
-            f"{remaining_units:,} units remaining. "
-            f"YouTube Listening may be unavailable soon."
+            f"[YouTube Quota] WARNING: {usage_percentage:.1f}% of daily quota used. "
+            f"{remaining_units:,} units remaining."
         )
 
-    # Exhausted — skip YouTube calls
     if current_usage >= YOUTUBE_DAILY_QUOTA:
         logger.error(
-            f"[YouTube Quota] ❌ EXHAUSTED: Daily quota fully used. "
+            f"[YouTube Quota] EXHAUSTED: Daily quota fully used. "
             f"YouTube Listening disabled until midnight Pacific reset."
         )
         return False
@@ -101,16 +74,9 @@ def check_youtube_quota() -> bool:
 
 
 def increment_youtube_quota(calls_made: int = 1):
-    """
-    B3 — Increment quota counter after successful YouTube API calls.
-
-    Args:
-        calls_made: Number of API calls made (default 1 per entity)
-    """
-    current = get_youtube_quota_usage()
+    current   = get_youtube_quota_usage()
     new_total = current + (calls_made * YOUTUBE_COST_PER_CALL)
     set_youtube_quota_usage(new_total)
-
     logger.debug(
         f"[YouTube Quota] Incremented by {calls_made * YOUTUBE_COST_PER_CALL} units. "
         f"New total: {new_total:,} / {YOUTUBE_DAILY_QUOTA:,}"
@@ -121,10 +87,8 @@ def monitor_news():
     """
     Runs every 2 hours.
     Processes one entity at a time with 60s gap between each.
-    Saves full AI analysis to cache.
-
-    Note: YouTube is handled separately in monitor_youtube()
-    to allow independent quota management.
+    Now includes Engine 0 (Formation), Engine 6 (Control),
+    Engine 7 (Trajectory) in the monitoring cycle.
     """
     entities = get_all_entities()
 
@@ -135,28 +99,26 @@ def monitor_news():
     logger.info(f"[Monitor] Starting full analysis for {len(entities)} entities...")
 
     for entity_data in entities:
-        # Handle both dict and string format from database
         if isinstance(entity_data, dict):
-            entity = entity_data["name"]
+            entity      = entity_data["name"]
             entity_type = entity_data.get("type", "brand").lower()
             description = entity_data.get("description", "")
         else:
-            entity = entity_data
+            entity      = entity_data
             entity_type = "brand"
             description = ""
 
         try:
             logger.info(f"\n[Monitor] ── Processing: {entity} ──")
 
-            # Fetch from all news sources (YouTube excluded — separate function)
-            news_posts = get_news_mentions(entity, entity_type, description)
+            # ── Fetch sources ─────────────────────────────────────────────────
+            news_posts  = get_news_mentions(entity, entity_type, description)
             gnews_posts = get_googlenews_mentions(entity, entity_type, description)
-            hn_posts = get_hackernews_mentions(entity)
+            hn_posts    = get_hackernews_mentions(entity)
 
-            # Apply B4 language + relevance filter
-            news_posts = filter_relevant(news_posts, entity)[:30]
+            news_posts  = filter_relevant(news_posts, entity)[:30]
             gnews_posts = filter_relevant(gnews_posts, entity)[:30]
-            hn_posts = filter_relevant(hn_posts, entity)[:15]
+            hn_posts    = filter_relevant(hn_posts, entity)[:15]
 
             all_posts = news_posts + gnews_posts + hn_posts
 
@@ -164,13 +126,13 @@ def monitor_news():
                 logger.info(f"[Monitor] No posts found for {entity}, skipping")
                 continue
 
-            # Save mentions to database
+            # ── Save mentions ─────────────────────────────────────────────────
             new_count = 0
             for post in all_posts:
-                text = post["text"]
-                source = post["source_name"]
+                text      = post["text"]
+                source    = post["source_name"]
                 sentiment = analyze_sentiment([text])
-                label = max(sentiment, key=sentiment.get)
+                label     = max(sentiment, key=sentiment.get)
                 try:
                     save_mention(entity, source, text, label)
                     new_count += 1
@@ -184,14 +146,14 @@ def monitor_news():
             # ── Engine 2: Understanding ───────────────────────────────────────
             logger.info(f"[Monitor] {entity}: running AI understanding...")
             ai_result = analyze_with_ai(entity, all_texts, entity_type)
-            time.sleep(15)  # Rate limit buffer for Groq API
+            time.sleep(15)
 
             # ── Engine 3: Actor Intelligence ──────────────────────────────────
             logger.info(f"[Monitor] {entity}: running actor analysis...")
             actor_result = analyze_actors(entity, all_posts)
             time.sleep(15)
 
-            # Save reputation score to history
+            # ── Save score to history ─────────────────────────────────────────
             sentiment_counts = {
                 "positive": ai_result["sentiment"]["positive_count"],
                 "negative": ai_result["sentiment"]["negative_count"],
@@ -200,37 +162,85 @@ def monitor_news():
             score = ai_result["sentiment"]["score"]
             save_result(entity, sentiment_counts, score)
 
+            # ── Engine 6: Control Score ───────────────────────────────────────
+            logger.info(f"[Monitor] {entity}: calculating control score...")
+            control_result = calculate_control_score(
+                entity=entity,
+                engine2_result=ai_result,
+                engine3_result=actor_result,
+                formation_result=None
+            )
+            time.sleep(5)
+
+            # ── Engine 7: Trajectory Model ────────────────────────────────────
+            logger.info(f"[Monitor] {entity}: modeling trajectory...")
+            trajectory_result = model_trajectory(
+                entity=entity,
+                entity_type=entity_type,
+                engine2_result=ai_result,
+                engine3_result=actor_result,
+                control_result=control_result
+            )
+            time.sleep(15)
+
             # ── Engine 4: Prediction ──────────────────────────────────────────
-            time.sleep(10)
             logger.info(f"[Monitor] {entity}: running prediction...")
             prediction = predict_trajectory(entity, ai_result, actor_result)
+            time.sleep(10)
 
-            # Build and cache full result
+            # ── Engine 0: Formation Detection ─────────────────────────────────
+            logger.info(f"[Monitor] {entity}: running formation detection...")
+            formation_result = detect_formation(
+                entity=entity,
+                current_posts=all_posts,
+                engine2_result=ai_result
+            )
+
+            if formation_result.get("signal_detected"):
+                logger.info(
+                    f"[Monitor] {entity}: FORMATION SIGNAL DETECTED | "
+                    f"stage: {formation_result.get('stage')} | "
+                    f"confidence: {formation_result.get('confidence')}%"
+                )
+            else:
+                logger.info(
+                    f"[Monitor] {entity}: no formation signal "
+                    f"({formation_result.get('reason', 'unknown')})"
+                )
+
+            # ── Build and cache full result ───────────────────────────────────
             full_result = {
-                "brand": entity,
-                "entity_type": entity_type,
-                "mentions": len(all_posts),
+                "brand":            entity,
+                "entity_type":      entity_type,
+                "mentions":         len(all_posts),
                 "sources": {
-                    "newsapi": len(news_posts),
-                    "google_news": len(gnews_posts),
-                    "hacker_news": len(hn_posts),
-                    "youtube": 0  # YouTube tracked separately
+                    "newsapi":      len(news_posts),
+                    "google_news":  len(gnews_posts),
+                    "hacker_news":  len(hn_posts),
+                    "youtube":      0
                 },
                 "reputation_score": score,
-                "sentiment": ai_result["sentiment"],
-                "topics": ai_result["topics"],
-                "narrative": ai_result["narrative"],
-                "signals": ai_result["signals"],
-                "summary": ai_result["summary"],
-                "actors": actor_result,
-                "prediction": prediction,
-                "cached": True
+                "sentiment":        ai_result["sentiment"],
+                "topics":           ai_result["topics"],
+                "narrative":        ai_result["narrative"],
+                "signals":          ai_result["signals"],
+                "summary":          ai_result["summary"],
+                "actors":           actor_result,
+                "control":          control_result,
+                "trajectory":       trajectory_result,
+                "formation":        formation_result,
+                "prediction":       prediction,
+                "cached":           True
             }
 
             save_analysis_cache(entity, full_result)
-            logger.info(f"[Monitor] {entity}: complete ✓ score={score}")
+            logger.info(
+                f"[Monitor] {entity}: complete ✓ "
+                f"score={score} | "
+                f"control={control_result.get('narrative_control_score')}/100 | "
+                f"window={control_result.get('intervention_window')}"
+            )
 
-            # Wait between entities to avoid API rate limits
             logger.info(f"[Monitor] Waiting 60s before next entity...")
             time.sleep(60)
 
@@ -242,12 +252,7 @@ def monitor_news():
 def monitor_youtube():
     """
     Runs every 2 hours — YouTube mentions only.
-
     B3 FIX: Quota tracking integrated.
-    - Checks quota before each entity
-    - Skips YouTube gracefully when exhausted
-    - Increments counter after each successful call
-    - Logs quota status for visibility
     """
     entities = get_all_entities()
 
@@ -256,26 +261,23 @@ def monitor_youtube():
 
     logger.info(f"[Monitor-YouTube] Checking {len(entities)} entities...")
 
-    # B3 — Check quota once at start of YouTube run
     if not check_youtube_quota():
         logger.warning(
-            "[Monitor-YouTube] Quota exhausted — skipping all YouTube mentions "
-            "until midnight Pacific reset."
+            "[Monitor-YouTube] Quota exhausted — skipping all YouTube mentions."
         )
         return
 
     for entity_data in entities:
         if isinstance(entity_data, dict):
-            entity = entity_data["name"]
+            entity      = entity_data["name"]
             entity_type = entity_data.get("type", "brand").lower()
             description = entity_data.get("description", "")
         else:
-            entity = entity_data
+            entity      = entity_data
             entity_type = "brand"
             description = ""
 
         try:
-            # B3 — Re-check quota before each entity (in case we're near limit)
             if not check_youtube_quota():
                 logger.warning(
                     f"[Monitor-YouTube] Quota exhausted mid-run. "
@@ -283,20 +285,17 @@ def monitor_youtube():
                 )
                 break
 
-            # Fetch YouTube mentions with full context (B4 fix: description included)
             posts = get_youtube_mentions(entity, entity_type, description)
             posts = filter_relevant(posts, entity)[:15]
 
-            # B3 — Increment quota after successful API call
             increment_youtube_quota(calls_made=1)
 
-            # Save mentions to database
             new_count = 0
             for post in posts:
-                text = post["text"]
-                source = post["source_name"]
+                text      = post["text"]
+                source    = post["source_name"]
                 sentiment = analyze_sentiment([text])
-                label = max(sentiment, key=sentiment.get)
+                label     = max(sentiment, key=sentiment.get)
                 try:
                     save_mention(entity, source, text, label)
                     new_count += 1
@@ -309,30 +308,22 @@ def monitor_youtube():
             logger.error(f"[Monitor-YouTube] Error for '{entity}': {e}")
 
 
-# ── Schedule Configuration ───────────────────────────────────────────────────
-# Both monitors run every 2 hours but are staggered slightly
-# to avoid simultaneous API bursts.
+# ── Schedule ──────────────────────────────────────────────────────────────────
 
 schedule.every(2).hours.do(monitor_news)
 schedule.every(2).hours.do(monitor_youtube)
 
 
 def start_monitor():
-    """
-    Entry point for background monitoring thread.
-
-    Runs initial analysis immediately on startup,
-    then enters scheduled loop.
-    """
     logger.info("[Monitor] Started")
     logger.info("[Monitor] Full AI analysis: every 2 hours")
     logger.info("[Monitor] YouTube: every 2 hours")
-    logger.info("[Monitor] YouTube quota tracking: enabled (B3)")
+    logger.info("[Monitor] Formation detection: every cycle")
+    logger.info("[Monitor] Control score: every cycle")
+    logger.info("[Monitor] Trajectory model: every cycle")
 
-    # Run initial analysis on startup
     monitor_news()
 
-    # Enter scheduled loop
     while True:
         schedule.run_pending()
         time.sleep(10)
