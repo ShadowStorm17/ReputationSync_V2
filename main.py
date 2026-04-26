@@ -243,16 +243,9 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     score = ai_result["sentiment"]["score"]
     save_result(brand, sentiment_counts, score)
 
-        # ── Engine 6: Narrative Control Score ─────────────────────────────────────
-    logger.info(f"[Analyze] Calculating narrative control score...")
-    control_score = calculate_control_score(
-        entity=brand,
-        engine2_result=ai_result,
-        engine3_result=actor_result,
-        formation_result=None  # Formation engine added in later step
-    )
-
-       # ── Engine 0: Formation Detection ─────────────────────────────────────────
+    # ── Engine 0: Formation Detection ────────────────────────────────────────
+    # Runs before control score so formation origin_type
+    # can feed into control score calculation
     logger.info(f"[Analyze] Running formation detection...")
     formation = detect_formation(
         entity=brand,
@@ -260,7 +253,16 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
         engine2_result=ai_result
     )
 
-    # ── Engine 7: Narrative Trajectory Model ──────────────────────────────────
+    # ── Engine 6: Narrative Control Score ────────────────────────────────────
+    logger.info(f"[Analyze] Calculating narrative control score...")
+    control_score = calculate_control_score(
+        entity=brand,
+        engine2_result=ai_result,
+        engine3_result=actor_result,
+        formation_result=formation if formation.get("signal_detected") else None
+    )
+
+    # ── Engine 7: Narrative Trajectory Model ─────────────────────────────────
     logger.info(f"[Analyze] Modeling narrative trajectory...")
     trajectory = model_trajectory(
         entity=brand,
@@ -276,21 +278,21 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     prediction = predict_trajectory(brand, ai_result, actor_result)
 
     result = {
-        "brand":            brand,
-        "entity_type":      entity_type,
-        "mentions":         len(all_posts),
-        "sources":          source_counts,
-        "reputation_score": score,
-        "sentiment":        ai_result["sentiment"],
-        "topics":           ai_result["topics"],
-        "narrative":        ai_result["narrative"],
-        "signals":          ai_result["signals"],
-        "summary":          ai_result["summary"],
-        "actors":           actor_result,
-        "control":          control_score,
-        "trajectory":       trajectory,
-        "formation":        formation,
-        "prediction":       prediction,
+        "brand":             brand,
+        "entity_type":       entity_type,
+        "mentions":          len(all_posts),
+        "sources":           source_counts,
+        "reputation_score":  score,
+        "sentiment":         ai_result["sentiment"],
+        "topics":            ai_result["topics"],
+        "narrative":         ai_result["narrative"],
+        "signals":           ai_result["signals"],
+        "summary":           ai_result["summary"],
+        "actors":            actor_result,
+        "formation":         formation,
+        "control":           control_score,
+        "trajectory":        trajectory,
+        "prediction":        prediction,
         "served_from_cache": False
     }
 
