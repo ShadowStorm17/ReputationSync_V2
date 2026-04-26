@@ -10,6 +10,7 @@
 # ============================================================
 
 from fastapi import FastAPI
+from engine_intelligence import generate_intelligence_brief
 from engine_trajectory import model_trajectory
 from engine_formation import detect_formation
 from engine_understanding import analyze_with_ai
@@ -276,24 +277,38 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     # ── Engine 4: Prediction ──────────────────────────────────────────────────
     logger.info(f"[Analyze] Running prediction...")
     prediction = predict_trajectory(brand, ai_result, actor_result)
+    # ── Intelligence Brief ────────────────────────────────────────────────────
+    logger.info(f"[Analyze] Generating strategic intelligence brief...")
+    intelligence_brief = generate_intelligence_brief(
+        entity=brand,
+        entity_type=entity_type,
+        engine2_result=ai_result,
+        engine3_result=actor_result,
+        engine4_result=prediction,
+        control_result=control_score,
+        trajectory_result=trajectory,
+        formation_result=formation
+    )
+    time.sleep(4)
 
     result = {
-        "brand":             brand,
-        "entity_type":       entity_type,
-        "mentions":          len(all_posts),
-        "sources":           source_counts,
-        "reputation_score":  score,
-        "sentiment":         ai_result["sentiment"],
-        "topics":            ai_result["topics"],
-        "narrative":         ai_result["narrative"],
-        "signals":           ai_result["signals"],
-        "summary":           ai_result["summary"],
-        "actors":            actor_result,
-        "formation":         formation,
-        "control":           control_score,
-        "trajectory":        trajectory,
-        "prediction":        prediction,
-        "served_from_cache": False
+        "brand":               brand,
+        "entity_type":         entity_type,
+        "mentions":            len(all_posts),
+        "sources":             source_counts,
+        "reputation_score":    score,
+        "sentiment":           ai_result["sentiment"],
+        "topics":              ai_result["topics"],
+        "narrative":           ai_result["narrative"],
+        "signals":             ai_result["signals"],
+        "summary":             ai_result["summary"],
+        "actors":              actor_result,
+        "formation":           formation,
+        "control":             control_score,
+        "trajectory":          trajectory,
+        "intelligence_brief":  intelligence_brief,
+        "prediction":          prediction,
+        "served_from_cache":   False
     }
 
     save_analysis_cache(brand, result)
