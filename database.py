@@ -139,6 +139,33 @@ def init_db():
         intervention_window TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
+        # mention_signals — time intelligence classification per mention
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS mention_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity TEXT,
+        signal_text TEXT,
+        claim TEXT,
+        narrative_angle TEXT,
+        classification TEXT,
+        first_seen TIMESTAMP,
+        last_seen TIMESTAMP,
+        reactivation_count INTEGER DEFAULT 0,
+        confidence REAL DEFAULT 0.5,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+
+    # narrative_state — stores previous narrative per entity
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS narrative_state (
+        entity TEXT PRIMARY KEY,
+        dominant_narrative TEXT,
+        emerging_narratives JSON,
+        narrative_type TEXT,
+        framing_keywords JSON,
+        confidence REAL,
+        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
 
     # Migration guard — adds description column if upgrading from older schema
     try:
@@ -779,5 +806,242 @@ def save_language_baseline(entity: str, common_phrases: list,
         print(f"[Baseline] Saved for '{entity}' — window: {window_date}")
     except Exception as e:
         print(f"[Baseline] Save error for '{entity}': {e}")
+    # ── Time Intelligence — Mention Signal Storage ────────────────────────────────
+
+def classify_mention_signal(entity: str, signal_text: str) -> str:
+    """
+    Classifies a signal as FRESH, REACTIVATED, or LEGACY.
+
+    FRESH:       Never seen before
+    REACTIVATED: Seen before, absent 7+ days, now back
+    LEGACY:      Continuously present, no meaningful change
+
+    Classification based on framing change, not just timestamps.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        SELECT id, last_seen, reactivation_count
+        FROM mention_signals
+        WHERE entity = ?
+        AND signal_text = ?
+        ORDER BY last_seen DESC
+        LIMIT 1
+        """, (entity, signal_text[:500]))
+
+        row = cursor.fetchone()
+
+        if not row:
+            return "FRESH"
+
+        last_seen  = datetime.fromisoformat(row[1])
+        days_absent = (datetime.utcnow() - last_seen).days
+
+        if days_absent >= 7:
+            return "REACTIVATED"
+
+        return "LEGACY"
+
+    except Exception as e:
+        print(f"[TimeIntel] Classification error: {e}")
+        return "FRESH"
     finally:
         conn.close()
+
+
+def save_mention_signal(entity: str, signal_text: str, claim: str,
+                         narrative_angle: str, classification: str,
+                         confidence: float = 0.5):
+    """
+    Saves a classified mention signal.
+    Updates last_seen and reactivation_count if signal already exists.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        signal_key = signal_text[:500]
+
+        cursor.execute("""
+        SELECT id, reactivation_count FROM mention_signals
+        WHERE entity = ? AND signal_text = ?
+        """, (entity, signal_key))
+
+        existing = cursor.fetchone()
+
+        if existing:
+            new_count = existing[1]
+            if classification == "REACTIVATED":
+                new_count += 1
+
+            cursor.execute("""
+            UPDATE mention_signals
+            SET last_seen = CURRENT_TIMESTAMP,
+                reactivation_count = ?,
+                claim = ?,
+                narrative_angle = ?,
+                classification = ?,
+                confidence = ?
+            WHERE id = ?
+            """, (new_count, claim, narrative_angle,
+                  classification, confidence, existing[0]))
+        else:
+            cursor.execute("""
+            INSERT INTO mention_signals
+            (entity, signal_text, claim, narrative_angle,
+             classification, first_seen, last_seen, confidence)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP, ?)
+            """, (entity, signal_key, claim, narrative_angle,
+                  classification, confidence))
+
+        conn.commit()
+
+    except Exception as e:
+        print(f"[TimeIntel] Save error for '{entity}': {e}")
+    finally:
+        conn.close()
+
+
+def get_fresh_signals(entity: str, limit: int = 10) -> list:
+    """
+    Returns only FRESH and REACTIVATED signals.
+    LEGACY signals are excluded — they are not actionable.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        SELECT signal_text, claim, narrative_angle,
+               classification, reactivation_count,
+               confidence, first_seen, last_seen
+        FROM mention_signals
+        WHERE entity = ?
+        AND classification IN ('FRESH', 'REACTIVATED')
+        ORDER BY last_seen DESC
+        LIMIT ?
+        """, (entity, limit))
+
+        rows = cursor.fetchall()
+        return [
+            {
+                "signal_text":        row[0],
+                "claim":              row[1],
+                "narrative_angle":    row[2],
+                "classification":     row[3],
+                "reactivation_count": row[4],
+                "confidence":         row[5],
+                "first_seen":         row[6],
+                "last_seen":          row[7]
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        print(f"[TimeIntel] Get signals error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_signals_summary(entity: str) -> dict:
+    """
+    Returns count of signals by classification.
+    Used by confidence layer.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        SELECT classification, COUNT(*) as count
+        FROM mention_signals
+        WHERE entity = ?
+        GROUP BY classification
+        """, (entity,))
+
+        rows = cursor.fetchall()
+        summary = {"FRESH": 0, "REACTIVATED": 0, "LEGACY": 0}
+        for row in rows:
+            summary[row[0]] = row[1]
+        return summary
+
+    except Exception as e:
+        print(f"[TimeIntel] Summary error: {e}")
+        return {"FRESH": 0, "REACTIVATED": 0, "LEGACY": 0}
+    finally:
+        conn.close()
+
+
+# ── Narrative State Storage ───────────────────────────────────────────────────
+
+def save_narrative_state(entity: str, dominant_narrative: str,
+                          emerging_narratives: list, narrative_type: str,
+                          framing_keywords: list, confidence: float):
+    """
+    Saves current narrative state.
+    Previous state is overwritten each cycle.
+    Narrative Shift Engine reads this to detect framing changes.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        INSERT OR REPLACE INTO narrative_state
+        (entity, dominant_narrative, emerging_narratives,
+         narrative_type, framing_keywords, confidence, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (entity,
+              dominant_narrative,
+              json.dumps(emerging_narratives),
+              narrative_type,
+              json.dumps(framing_keywords),
+              confidence))
+        conn.commit()
+        print(f"[NarrativeState] Saved for '{entity}'")
+
+    except Exception as e:
+        print(f"[NarrativeState] Save error for '{entity}': {e}")
+    finally:
+        conn.close()
+
+
+def get_previous_narrative_state(entity: str) -> dict | None:
+    """
+    Returns previous narrative state for comparison.
+    Returns None on first run — no baseline exists yet.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+        SELECT entity, dominant_narrative, emerging_narratives,
+               narrative_type, framing_keywords, confidence, recorded_at
+        FROM narrative_state
+        WHERE entity = ?
+        """, (entity,))
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        return {
+            "entity":              row[0],
+            "dominant_narrative":  row[1],
+            "emerging_narratives": json.loads(row[2]) if row[2] else [],
+            "narrative_type":      row[3],
+            "framing_keywords":    json.loads(row[4]) if row[4] else [],
+            "confidence":          row[5],
+            "recorded_at":         row[6]
+        }
+
+    except Exception as e:
+        print(f"[NarrativeState] Read error for '{entity}': {e}")
+        return None
+    finally:
+        conn.close()
+    
