@@ -37,6 +37,8 @@ from engine_prediction import predict_trajectory
 from engine_control_score import calculate_control_score
 from engine_trajectory import model_trajectory
 from engine_formation import detect_formation
+from engine_signals import extract_signals
+from database import (get_previous_narrative_state, save_narrative_state)
 
 logger = logging.getLogger(__name__)
 
@@ -188,13 +190,40 @@ def monitor_news():
             prediction = predict_trajectory(entity, ai_result, actor_result)
             time.sleep(10)
 
-            # ── Engine 0: Formation Detection ─────────────────────────────────
+                        # ── Engine 0: Formation Detection ─────────────────────────────────
             logger.info(f"[Monitor] {entity}: running formation detection...")
             formation_result = detect_formation(
                 entity=entity,
                 current_posts=all_posts,
                 engine2_result=ai_result
             )
+
+            # ── Signal Extraction ──────────────────────────────────────────────
+            logger.info(f"[Monitor] {entity}: extracting signals...")
+            previous_state = get_previous_narrative_state(entity)
+            signal_result = extract_signals(
+                entity=entity,
+                current_posts=all_posts,
+                previous_state=previous_state
+            )
+
+            # Save narrative state for next cycle comparison
+            narrative = ai_result.get("narrative", {})
+            save_narrative_state(
+                entity=entity,
+                dominant_narrative=narrative.get("current_story", ""),
+                emerging_narratives=[],
+                narrative_type=narrative.get("narrative_type", "neutral"),
+                framing_keywords=ai_result.get("topics", []),
+                confidence=0.6
+            )
+
+            if signal_result.get("signals"):
+                logger.info(
+                    f"[Monitor] {entity}: "
+                    f"{signal_result['signal_summary']['actionable_signals']} signals | "
+                    f"shift: {signal_result['narrative_shift']['shift_type']}"
+                )
 
             if formation_result.get("signal_detected"):
                 logger.info(
@@ -210,29 +239,29 @@ def monitor_news():
 
             # ── Build and cache full result ───────────────────────────────────
             full_result = {
-                "brand":            entity,
-                "entity_type":      entity_type,
-                "mentions":         len(all_posts),
+                "brand":                entity,
+                "entity_type":          entity_type,
+                "mentions":             len(all_posts),
                 "sources": {
-                    "newsapi":      len(news_posts),
-                    "google_news":  len(gnews_posts),
-                    "hacker_news":  len(hn_posts),
-                    "youtube":      0
+                    "newsapi":           len(news_posts),
+                    "google_news":       len(gnews_posts),
+                    "hacker_news":       len(hn_posts),
+                    "youtube":           0
                 },
-                "reputation_score": score,
-                "sentiment":        ai_result["sentiment"],
-                "topics":           ai_result["topics"],
-                "narrative":        ai_result["narrative"],
-                "signals":          ai_result["signals"],
-                "summary":          ai_result["summary"],
-                "actors":           actor_result,
-                "control":          control_result,
-                "trajectory":       trajectory_result,
-                "formation":        formation_result,
-                "prediction":       prediction,
-                "cached":           True
+                "reputation_score":     score,
+                "sentiment":            ai_result["sentiment"],
+                "topics":               ai_result["topics"],
+                "narrative":            ai_result["narrative"],
+                "signals":              ai_result["signals"],
+                "summary":              ai_result["summary"],
+                "actors":               actor_result,
+                "control":              control_result,
+                "trajectory":           trajectory_result,
+                "formation":            formation_result,
+                "signals_intelligence": signal_result,
+                "prediction":           prediction,
+                "cached":               True
             }
-
             save_analysis_cache(entity, full_result)
             logger.info(
                 f"[Monitor] {entity}: complete ✓ "

@@ -16,6 +16,9 @@ from engine_formation import detect_formation
 from engine_understanding import analyze_with_ai
 from engine_actors import analyze_actors
 from engine_prediction import predict_trajectory
+from engine_signals import extract_signals
+from database import (get_previous_narrative_state, save_narrative_state,
+                      get_fresh_signals, get_signals_summary)
 from engine_action import generate_playbook
 from engine_control_score import calculate_control_score
 from database import (
@@ -244,14 +247,33 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     score = ai_result["sentiment"]["score"]
     save_result(brand, sentiment_counts, score)
 
-    # ── Engine 0: Formation Detection ────────────────────────────────────────
-    # Runs before control score so formation origin_type
-    # can feed into control score calculation
+        # ── Engine 0: Formation Detection ────────────────────────────────────────
     logger.info(f"[Analyze] Running formation detection...")
     formation = detect_formation(
         entity=brand,
         current_posts=all_posts,
         engine2_result=ai_result
+    )
+
+    # ── Signal Extraction ─────────────────────────────────────────────────────
+    # Extracts what changed this cycle vs previous state
+    logger.info(f"[Analyze] Extracting signals...")
+    previous_state = get_previous_narrative_state(brand)
+    signal_result = extract_signals(
+        entity=brand,
+        current_posts=all_posts,
+        previous_state=previous_state
+    )
+
+    # Save current narrative state for next cycle comparison
+    narrative = ai_result.get("narrative", {})
+    save_narrative_state(
+        entity=brand,
+        dominant_narrative=narrative.get("current_story", ""),
+        emerging_narratives=[],
+        narrative_type=narrative.get("narrative_type", "neutral"),
+        framing_keywords=ai_result.get("topics", []),
+        confidence=0.6
     )
 
     # ── Engine 6: Narrative Control Score ────────────────────────────────────
@@ -292,23 +314,24 @@ def analyze(brand: str, entity_type: str = "brand", description: str = ""):
     time.sleep(4)
 
     result = {
-        "brand":               brand,
-        "entity_type":         entity_type,
-        "mentions":            len(all_posts),
-        "sources":             source_counts,
-        "reputation_score":    score,
-        "sentiment":           ai_result["sentiment"],
-        "topics":              ai_result["topics"],
-        "narrative":           ai_result["narrative"],
-        "signals":             ai_result["signals"],
-        "summary":             ai_result["summary"],
-        "actors":              actor_result,
-        "formation":           formation,
-        "control":             control_score,
-        "trajectory":          trajectory,
-        "intelligence_brief":  intelligence_brief,
-        "prediction":          prediction,
-        "served_from_cache":   False
+        "brand":                brand,
+        "entity_type":          entity_type,
+        "mentions":             len(all_posts),
+        "sources":              source_counts,
+        "reputation_score":     score,
+        "sentiment":            ai_result["sentiment"],
+        "topics":               ai_result["topics"],
+        "narrative":            ai_result["narrative"],
+        "signals":              ai_result["signals"],
+        "summary":              ai_result["summary"],
+        "actors":               actor_result,
+        "formation":            formation,
+        "signals_intelligence": signal_result,
+        "control":              control_score,
+        "trajectory":           trajectory,
+        "intelligence_brief":   intelligence_brief,
+        "prediction":           prediction,
+        "served_from_cache":    False
     }
 
     save_analysis_cache(brand, result)
